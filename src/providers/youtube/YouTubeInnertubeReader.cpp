@@ -583,7 +583,9 @@ void YouTubeInnertubeReader::requestChat()
             this->continuation_ = nextContinuation;
             this->retryAttempt_ = 0;
             this->errorReported_ = false;
-            this->requestTimer_.start(std::clamp(timeoutMs, 500, 60000));
+            // Bound the website's suggested wait so busy chats do not sit
+            // idle for several seconds between continuation requests.
+            this->requestTimer_.start(std::clamp(timeoutMs, 500, 1500));
         })
         .onError([this](const NetworkResult &result) {
             if (this->stopped_)
