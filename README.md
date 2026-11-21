@@ -28,6 +28,20 @@ Innertube is an undocumented YouTube interface and may change. OAuth-backed acti
 
 This repository is private. Anyone cloning it must first be granted access to the GitHub repository.
 
+### Use this fork with an existing Chatterino install
+
+You cannot add the YouTube features to an existing upstream Chatterino installation with a setting or plugin. They are compiled into this fork, so you need to build and run a version from the `youtube-innertube-preview` branch. You do not need to uninstall the official app: keep the fork in a separate folder and run its build there.
+
+On Windows, follow the build steps below and the [standalone packaging instructions](BUILDING_ON_WINDOWS.md#producing-standalone-builds). Copy the complete packaged output, including its Qt runtime files, into a separate folder; copying only `chatterino.exe` is not enough. Then launch `chatterino.exe` from that folder.
+
+By default, the fork uses the same Chatterino settings profile as the official install. To keep the fork's settings and cache separate, create a file named `modes` beside its executable and put this single line in it:
+
+```text
+portable
+```
+
+Replacing the official installation is possible, but back up the installation and your settings first, and replace the complete packaged output rather than only the executable. With the updater enabled (the default), this fork still checks the upstream Chatterino update service, so an upstream update may replace the fork's YouTube build. Running it in a separate portable folder is the safer option.
+
 ## Download
 
 Current releases are available at [https://chatterino.com](https://chatterino.com).
