@@ -15,6 +15,8 @@
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
@@ -118,6 +120,12 @@ Split::Split(QWidget *parent)
         getApp()->getAccounts()->twitch.currentUserChanged, [this] {
             this->updateInputPlaceholder();
         });
+    if (auto *youtube = getApp()->getYouTube())
+    {
+        this->signalHolder_.managedConnect(youtube->authChanged, [this] {
+            this->updateInputPlaceholder();
+        });
+    }
     this->signalHolder_.managedConnect(this->channelChanged, [this] {
         this->updateInputPlaceholder();
     });
@@ -670,6 +678,15 @@ PinnedMessageWidget *Split::getPinnedBanner() const
 
 void Split::updateInputPlaceholder()
 {
+    if (this->getChannel()->isYouTubeChannel())
+    {
+        auto *youtube = getApp()->getYouTube();
+        this->input_->ui_.textEdit->setPlaceholderText(
+            youtube != nullptr && youtube->isLoggedIn()
+                ? "Send message to YouTube live chat..."
+                : "Sign in to YouTube to send messages...");
+        return;
+    }
     if (!this->getChannel()->isTwitchChannel())
     {
         return;
@@ -1095,6 +1112,22 @@ void Split::openInBrowser()
     {
         QDesktopServices::openUrl("https://www.twitch.tv/" +
                                   twitchChannel->getName());
+    }
+    else if (auto *youtubeChannel =
+                 dynamic_cast<YouTubeChannel *>(channel.get()))
+    {
+        QDesktopServices::openUrl("https://www.youtube.com/watch?v=" +
+                                  youtubeChannel->videoId());
+    }
+}
+
+void Split::openYouTubeStudio()
+{
+    if (auto *youtubeChannel =
+            dynamic_cast<YouTubeChannel *>(this->getChannel().get()))
+    {
+        QDesktopServices::openUrl("https://studio.youtube.com/video/" +
+                                  youtubeChannel->videoId() + "/livestreaming");
     }
 }
 

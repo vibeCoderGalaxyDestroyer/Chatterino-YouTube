@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QMenu>
 #include <QPoint>
+#include <QTimer>
 
 #include <memory>
 #include <vector>
@@ -72,6 +73,7 @@ private:
     bool isLive_{false};
     QString thumbnail_;
     QElapsedTimer lastThumbnail_;
+    QTimer youtubeStreamTimer_;
     std::chrono::steady_clock::time_point lastReloadedChannelEmotes_;
     std::chrono::steady_clock::time_point lastReloadedSubEmotes_;
 

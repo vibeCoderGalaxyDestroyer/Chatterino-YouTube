@@ -201,6 +201,7 @@ public Q_SLOTS:
     void showOverlayWindow();
     void clear();
     void openInBrowser();
+    void openYouTubeStudio();
     void openModViewInBrowser();
     void openWhispersInBrowser();
     void openBrowserPlayer();

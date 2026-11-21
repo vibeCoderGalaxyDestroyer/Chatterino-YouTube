@@ -50,6 +50,7 @@
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/twitch/TwitchUsers.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/CrashHandler.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/helper/LoggingChannel.hpp"
@@ -164,6 +165,7 @@ Application::Application(Settings &_settings, const Paths &paths,
     , emotes(new EmoteController)
     , accounts(new AccountController)
     , eventSub(new eventsub::Controller())
+    , youtube(new YouTubeProvider)
     , hotkeys(new HotkeyController)
     , windows(new WindowManager(_args, paths, _settings, *this->themes,
                                 *this->fonts))
@@ -502,6 +504,11 @@ Updates &Application::getUpdates()
 ITwitchIrcServer *Application::getTwitch()
 {
     return this->twitch.get();
+}
+
+YouTubeProvider *Application::getYouTube()
+{
+    return this->youtube.get();
 }
 
 PubSub *Application::getTwitchPubSub()

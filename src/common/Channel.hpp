@@ -53,6 +53,8 @@ public:
         TwitchAutomod,
         /// TwitchEnd
         TwitchEnd,
+        /// YouTube live chat
+        YouTube,
         /// Misc
         Misc,
     };
@@ -77,6 +79,7 @@ public:
     virtual const QString &getDisplayName() const;
     virtual const QString &getLocalizedName() const;
     bool isTwitchChannel() const;
+    bool isYouTubeChannel() const;
     virtual bool isEmpty() const;
 
     std::vector<MessagePtr> getMessageSnapshot() const;
@@ -225,6 +228,8 @@ constexpr std::optional<std::string_view> qmagicenumSerializedName(
         case Type::Direct:
         case Type::TwitchEnd:
             return std::nullopt;  // FIXME: Remove these (#5703)
+        case Type::YouTube:
+            return "youtube";
     }
     return std::nullopt;
 }

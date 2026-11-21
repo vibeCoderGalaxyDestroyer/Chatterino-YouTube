@@ -12,6 +12,7 @@ namespace chatterino {
 class Args;
 class TwitchIrcServer;
 class ITwitchIrcServer;
+class YouTubeProvider;
 class PubSub;
 class Updates;
 
@@ -94,6 +95,7 @@ public:
     virtual HighlightController *getHighlights() = 0;
     virtual NotificationController *getNotifications() = 0;
     virtual ITwitchIrcServer *getTwitch() = 0;
+    virtual YouTubeProvider *getYouTube() = 0;
     virtual PubSub *getTwitchPubSub() = 0;
     virtual ILogging *getChatLogger() = 0;
     virtual IChatterinoBadges *getChatterinoBadges() = 0;
@@ -164,6 +166,7 @@ private:
     std::unique_ptr<EmoteController> emotes;
     std::unique_ptr<AccountController> accounts;
     std::unique_ptr<eventsub::IController> eventSub;
+    std::unique_ptr<YouTubeProvider> youtube;
     std::unique_ptr<HotkeyController> hotkeys;
     std::unique_ptr<WindowManager> windows;
     std::unique_ptr<Toasts> toasts;
@@ -222,6 +225,7 @@ public:
     NotificationController *getNotifications() override;
     HighlightController *getHighlights() override;
     ITwitchIrcServer *getTwitch() override;
+    YouTubeProvider *getYouTube() override;
     PubSub *getTwitchPubSub() override;
     ILogging *getChatLogger() override;
     FfzBadges *getFfzBadges() override;

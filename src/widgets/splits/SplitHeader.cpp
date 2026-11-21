@@ -18,6 +18,8 @@
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
 #include "singletons/Theme.hpp"
@@ -40,9 +42,12 @@
 #include <QDrag>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
+#include <QStringList>
 
 #include <cmath>
 
@@ -244,6 +249,65 @@ auto formatTitle(const TwitchChannel::StreamStatus &s, Settings &settings,
     return title;
 }
 
+auto youtubeUptime(const YouTubeChannel &channel) -> QString
+{
+    if (!channel.actualStartTime().isValid())
+    {
+        return {};
+    }
+
+    const auto seconds = std::max<qint64>(
+        0, channel.actualStartTime().secsTo(QDateTime::currentDateTime()));
+    return formatTime(std::chrono::seconds{seconds}, 2);
+}
+
+auto formatYouTubeTooltip(const YouTubeChannel &channel,
+                          const QString &thumbnail) -> QString
+{
+    const auto &settings = *getSettings();
+    const bool hideViewerCountAndDuration =
+        getApp()->getStreamerMode()->isEnabled() &&
+        settings.streamerModeHideViewerCountAndDuration;
+
+    QString image;
+    if (settings.thumbnailSizeStream.getValue() != 0 && !thumbnail.isEmpty())
+    {
+        image = QString("<img width=\"360\" "
+                        "src=\"data:image/jpeg;base64,%1\"><br><br>")
+                    .arg(thumbnail);
+    }
+
+    QStringList streamInfo{"Live"};
+    if (!hideViewerCountAndDuration)
+    {
+        const auto uptime = youtubeUptime(channel);
+        if (!uptime.isEmpty())
+        {
+            streamInfo.append("for " + uptime);
+        }
+        if (channel.concurrentViewers() >= 0)
+        {
+            streamInfo.append("with " +
+                              localizeNumbers(channel.concurrentViewers()) +
+                              " viewers");
+        }
+    }
+    else
+    {
+        streamInfo.append("<span style=\"color: #808892;\">&lt;Streamer "
+                          "Mode&gt;</span>");
+    }
+
+    auto title = channel.videoTitle().toHtmlEscaped();
+    if (title.isEmpty())
+    {
+        title = "YouTube live stream";
+    }
+
+    return QString("<p style=\"text-align: center;\"><b>%1</b><br>%2%3</p>")
+        .arg(title, image, streamInfo.join(' '));
+}
+
 auto distance(QPoint a, QPoint b)
 {
     auto x = std::abs(a.x() - b.x());
@@ -261,6 +325,10 @@ SplitHeader::SplitHeader(Split *split)
     , split_(split)
     , tooltipWidget_(new TooltipWidget(this))
 {
+    this->youtubeStreamTimer_.setInterval(60'000);
+    QObject::connect(&this->youtubeStreamTimer_, &QTimer::timeout, this,
+                     &SplitHeader::updateChannelText);
+
     this->initializeLayout();
 
     this->setMouseTracking(true);
@@ -293,6 +361,7 @@ SplitHeader::SplitHeader(Split *split)
     getSettings()->headerStreamTitle.connect(_, this->managedConnections_);
     getSettings()->headerGame.connect(_, this->managedConnections_);
     getSettings()->headerUptime.connect(_, this->managedConnections_);
+    getSettings()->thumbnailSizeStream.connect(_, this->managedConnections_);
 
     auto *window = dynamic_cast<BaseWindow *>(this->window());
     if (window)
@@ -517,6 +586,55 @@ std::unique_ptr<QMenu> SplitHeader::createMainMenu()
                 h->getDisplaySequence(HotkeyCategory::Split, "openModView"),
                 this->split_, &Split::openModViewInBrowser);
         }
+    }
+
+    if (auto *youtubeChannel =
+            dynamic_cast<YouTubeChannel *>(this->split_->getChannel().get()))
+    {
+        menu->addAction("Open in YouTube", this->split_, &Split::openInBrowser);
+        menu->addAction("Open YouTube Studio", this->split_,
+                        &Split::openYouTubeStudio);
+        if (getApp()->getYouTube()->isLoggedIn())
+        {
+            menu->addAction(
+                "Create live chat poll…", this, [this, youtubeChannel] {
+                    bool ok = false;
+                    const auto question = QInputDialog::getText(
+                        this, "Create YouTube poll",
+                        "Poll question:", QLineEdit::Normal, {}, &ok);
+                    if (!ok || question.trimmed().isEmpty())
+                    {
+                        return;
+                    }
+                    const auto optionsText = QInputDialog::getText(
+                        this, "Create YouTube poll",
+                        "Enter 2 to 4 options separated by |:",
+                        QLineEdit::Normal, {}, &ok);
+                    if (!ok)
+                    {
+                        return;
+                    }
+                    QStringList options;
+                    for (const auto &option :
+                         optionsText.split('|', Qt::SkipEmptyParts))
+                    {
+                        const auto trimmed = option.trimmed();
+                        if (!trimmed.isEmpty())
+                        {
+                            options.push_back(trimmed);
+                        }
+                    }
+                    if (options.size() < 2 || options.size() > 4)
+                    {
+                        QMessageBox::warning(
+                            this, "Create YouTube poll",
+                            "A YouTube poll needs 2 to 4 non-empty options.");
+                        return;
+                    }
+                    youtubeChannel->createPoll(question.trimmed(), options);
+                });
+        }
+        menu->addSeparator();
     }
 
     menu->addAction(
@@ -904,6 +1022,16 @@ void SplitHeader::handleChannelChanged()
 
         this->updatePinButton();
     }
+    else if (auto *youtubeChannel =
+                 dynamic_cast<YouTubeChannel *>(channel.get()))
+    {
+        this->channelConnections_.managedConnect(
+            youtubeChannel->displayNameChanged, [this] {
+                this->resetThumbnail();
+                this->updateChannelText();
+            });
+        this->updatePinButton();
+    }
     else
     {
         this->updatePinButton();
@@ -951,6 +1079,7 @@ void SplitHeader::updatePinButton()
 
 void SplitHeader::updateChannelText()
 {
+    this->youtubeStreamTimer_.stop();
     auto indirectChannel = this->split_->getIndirectChannel();
     auto channel = this->split_->getChannel();
     this->isLive_ = false;
@@ -1021,6 +1150,80 @@ void SplitHeader::updateChannelText()
         else
         {
             this->tooltipText_ = formatOfflineTooltip(*streamStatus);
+        }
+    }
+    else if (auto *youtubeChannel =
+                 dynamic_cast<YouTubeChannel *>(channel.get()))
+    {
+        this->isLive_ = youtubeChannel->isLive();
+        if (this->isLive_)
+        {
+            title += " (live)";
+
+            const auto &settings = *getSettings();
+            const bool hideViewerCountAndDuration =
+                getApp()->getStreamerMode()->isEnabled() &&
+                settings.streamerModeHideViewerCountAndDuration;
+            if (!hideViewerCountAndDuration)
+            {
+                const auto uptime = youtubeUptime(*youtubeChannel);
+                if (!uptime.isEmpty())
+                {
+                    title += " - " + uptime;
+                }
+            }
+            if (!hideViewerCountAndDuration &&
+                youtubeChannel->concurrentViewers() >= 0)
+            {
+                title += " - " +
+                         localizeNumbers(youtubeChannel->concurrentViewers());
+            }
+            if (!youtubeChannel->videoTitle().isEmpty())
+            {
+                title += " - " + youtubeChannel->videoTitle().simplified();
+            }
+
+            const auto thumbnailUrl = youtubeChannel->thumbnailUrl();
+            if (!thumbnailUrl.isEmpty() &&
+                settings.thumbnailSizeStream.getValue() != 0 &&
+                (!this->lastThumbnail_.isValid() ||
+                 this->lastThumbnail_.elapsed() > THUMBNAIL_MAX_AGE_MS))
+            {
+                const auto videoId = youtubeChannel->videoId();
+                NetworkRequest(thumbnailUrl, NetworkRequestType::Get)
+                    .caller(this)
+                    .onSuccess([this, videoId](auto result) {
+                        assert(!isAppAboutToQuit());
+                        const auto currentChannel =
+                            dynamic_cast<YouTubeChannel *>(
+                                this->split_->getChannel().get());
+                        if (currentChannel == nullptr ||
+                            currentChannel->videoId() != videoId)
+                        {
+                            return;
+                        }
+                        if (result.status() == 200)
+                        {
+                            this->thumbnail_ = QString::fromLatin1(
+                                result.getData().toBase64());
+                        }
+                        else
+                        {
+                            this->thumbnail_.clear();
+                        }
+                        this->updateChannelText();
+                    })
+                    .execute();
+                this->lastThumbnail_.restart();
+            }
+
+            this->tooltipText_ =
+                formatYouTubeTooltip(*youtubeChannel, this->thumbnail_);
+            this->youtubeStreamTimer_.start();
+        }
+        else if (!youtubeChannel->videoTitle().isEmpty())
+        {
+            title += " - " + youtubeChannel->videoTitle().simplified();
         }
     }
 

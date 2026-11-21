@@ -53,6 +53,10 @@ Channel::Channel(const QString &name, Type type)
     {
         this->platform_ = "twitch";
     }
+    else if (this->isYouTubeChannel())
+    {
+        this->platform_ = "youtube";
+    }
 }
 
 Channel::~Channel()
@@ -87,6 +91,11 @@ const QString &Channel::getLocalizedName() const
 bool Channel::isTwitchChannel() const
 {
     return this->type_ >= Type::Twitch && this->type_ < Type::TwitchEnd;
+}
+
+bool Channel::isYouTubeChannel() const
+{
+    return this->type_ == Type::YouTube;
 }
 
 bool Channel::isEmpty() const

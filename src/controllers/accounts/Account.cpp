@@ -12,12 +12,15 @@ Account::Account(ProviderId providerId)
     : providerId_(providerId)
 {
     static QString twitch("Twitch");
+    static QString youtube("YouTube");
 
     this->category_ = [&]() {
         switch (providerId)
         {
             case ProviderId::Twitch:
                 return twitch;
+            case ProviderId::YouTube:
+                return youtube;
         }
         return QString("Unknown ProviderId");
     }();

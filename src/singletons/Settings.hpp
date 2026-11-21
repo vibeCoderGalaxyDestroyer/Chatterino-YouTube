@@ -648,6 +648,14 @@ public:
     BoolSetting loadTwitchMessageHistoryOnConnect = {
         "/misc/twitch/loadMessageHistoryOnConnect", true};
     QStringSetting messageHistoryUrl = {"/misc/twitch/messageHistoryUrl", ""};
+    QStringSetting youtubeApiKey = {"/accounts/youtube/apiKey", ""};
+    QStringSetting youtubeOAuthClientId = {"/accounts/youtube/oauthClientId",
+                                           ""};
+    QStringSetting youtubeOAuthClientSecret = {
+        "/accounts/youtube/oauthClientSecret", ""};
+    QStringSetting youtubeAccessToken = {"/accounts/youtube/accessToken", ""};
+    QStringSetting youtubeRefreshToken = {"/accounts/youtube/refreshToken", ""};
+    IntSetting youtubeTokenExpiry = {"/accounts/youtube/tokenExpiry", 0};
     IntSetting twitchMessageHistoryLimit = {
         "/misc/twitch/messageHistoryLimit",
         800,

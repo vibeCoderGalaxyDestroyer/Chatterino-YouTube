@@ -138,6 +138,11 @@ public:
         return nullptr;
     }
 
+    YouTubeProvider *getYouTube() override
+    {
+        return nullptr;
+    }
+
     PubSub *getTwitchPubSub() override
     {
         assert(false && "getTwitchPubSub was called without being initialized");

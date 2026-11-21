@@ -8,12 +8,19 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/accounts/AccountModel.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
+#include "singletons/Settings.hpp"
 #include "util/LayoutCreator.hpp"
 #include "widgets/dialogs/LoginDialog.hpp"
 #include "widgets/helper/EditableModelView.hpp"
 
 #include <QDialogButtonBox>
 #include <QHeaderView>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPointer>
+#include <QPushButton>
 #include <QTableView>
 #include <QVBoxLayout>
 
@@ -27,6 +34,73 @@ AccountsPage::AccountsPage()
 
     LayoutCreator<AccountsPage> layoutCreator(this);
     auto layout = layoutCreator.emplace<QVBoxLayout>().withoutMargin();
+
+    layout.emplace<QLabel>(
+        "YouTube API key (needed for viewing while signed out)");
+    auto *youtubeApiKey = layout.emplace<QLineEdit>().getElement();
+    youtubeApiKey->setEchoMode(QLineEdit::Password);
+    youtubeApiKey->setText(getSettings()->youtubeApiKey.getValue());
+    QObject::connect(youtubeApiKey, &QLineEdit::textChanged,
+                     [](const QString &value) {
+                         getSettings()->youtubeApiKey.setValue(value);
+                     });
+
+    layout.emplace<QLabel>("Google Desktop OAuth client ID (for sign-in)");
+    auto *youtubeClientId = layout.emplace<QLineEdit>().getElement();
+    youtubeClientId->setText(getSettings()->youtubeOAuthClientId.getValue());
+    QObject::connect(youtubeClientId, &QLineEdit::textChanged,
+                     [](const QString &value) {
+                         getSettings()->youtubeOAuthClientId.setValue(value);
+                     });
+
+    layout.emplace<QLabel>("Google OAuth client secret (if required)");
+    auto *youtubeClientSecret = layout.emplace<QLineEdit>().getElement();
+    youtubeClientSecret->setEchoMode(QLineEdit::Password);
+    youtubeClientSecret->setText(
+        getSettings()->youtubeOAuthClientSecret.getValue());
+    QObject::connect(youtubeClientSecret, &QLineEdit::textChanged,
+                     [](const QString &value) {
+                         getSettings()->youtubeOAuthClientSecret.setValue(value);
+                     });
+
+    auto *youtubeStatus = layout.emplace<QLabel>().getElement();
+    youtubeStatus->setWordWrap(true);
+    const auto updateYouTubeStatus = [status = QPointer<QLabel>(youtubeStatus),
+                                      provider = app->getYouTube()] {
+        if (status)
+        {
+            if (provider->isLoggedIn())
+            {
+                status->setText("YouTube: signed in");
+            }
+            else if (!provider->authError().isEmpty())
+            {
+                status->setText("YouTube sign-in failed: " +
+                                provider->authError());
+            }
+            else
+            {
+                status->setText("YouTube: signed out");
+            }
+        }
+    };
+    updateYouTubeStatus();
+    std::ignore = app->getYouTube()->authChanged.connect(updateYouTubeStatus);
+
+    auto *youtubeSignIn =
+        layout.emplace<QPushButton>("Sign in to YouTube").getElement();
+    QObject::connect(youtubeSignIn, &QPushButton::clicked, this, [this, app] {
+        QString error;
+        if (!app->getYouTube()->startLogin(&error))
+        {
+            QMessageBox::warning(this, "YouTube sign-in", error);
+        }
+    });
+    auto *youtubeSignOut =
+        layout.emplace<QPushButton>("Sign out of YouTube").getElement();
+    QObject::connect(youtubeSignOut, &QPushButton::clicked, this, [app] {
+        app->getYouTube()->logout();
+    });
 
     EditableModelView *view =
         layout

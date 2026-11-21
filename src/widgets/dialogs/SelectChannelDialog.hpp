@@ -71,6 +71,8 @@ private:
         detail::AutoCheckedRadioButton *channel;
         QLabel *channelLabel;
         QLineEdit *channelName;
+        detail::AutoCheckedRadioButton *youtube;
+        QLabel *youtubeLabel;
 
         detail::AutoCheckedRadioButton *whispers;
         QLabel *whispersLabel;

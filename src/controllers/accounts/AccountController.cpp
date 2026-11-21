@@ -47,6 +47,8 @@ AccountController::AccountController()
                 }
             }
             break;
+            case ProviderId::YouTube:
+                break;
         }
     });
 }

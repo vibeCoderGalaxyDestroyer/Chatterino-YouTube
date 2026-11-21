@@ -8,6 +8,7 @@
 #include "common/QLogging.hpp"
 #include "debug/AssertInGuiThread.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "util/Backup.hpp"
 #include "util/QMagicEnumTagged.hpp"
 #include "widgets/Window.hpp"
@@ -146,6 +147,8 @@ IndirectChannel SplitDescriptor::decodeChannel() const
     {
         case Channel::Type::Twitch:
             return getApp()->getTwitch()->getOrAddChannel(this->channelName_);
+        case Channel::Type::YouTube:
+            return getApp()->getYouTube()->getOrAddChannel(this->channelName_);
         case Channel::Type::TwitchMentions:
             return getApp()->getTwitch()->getMentionsChannel();
         case Channel::Type::TwitchWatching:
@@ -175,6 +178,9 @@ void SplitDescriptor::setChannel(const IndirectChannel &chan)
     {
         case Channel::Type::Twitch:
         case Channel::Type::Misc:
+            this->channelName_ = chan.get()->getName();
+            break;
+        case Channel::Type::YouTube:
             this->channelName_ = chan.get()->getName();
             break;
 
@@ -403,13 +409,36 @@ ExpectedStr<WindowLayout> WindowLayout::loadFromFile(const QString &path)
 void WindowLayout::activateOrAddChannel(ProviderId provider,
                                         const QString &name)
 {
-    if (provider != ProviderId::Twitch || name.startsWith(u'/') ||
-        name.startsWith(u'$'))
+    if ((provider != ProviderId::Twitch && provider != ProviderId::YouTube) ||
+        name.startsWith(u'/') || name.startsWith(u'$'))
     {
-        qCWarning(chatterinoWindowmanager)
-            << "Only twitch channels can be set as active";
+        qCWarning(chatterinoWindowmanager) << "Unsupported channel provider";
         return;
     }
+
+    auto channelName = name;
+    if (provider == ProviderId::YouTube)
+    {
+        const auto videoId = YouTubeProvider::extractVideoId(name);
+        if (!YouTubeProvider::isValidInput(name))
+        {
+            qCWarning(chatterinoWindowmanager)
+                << "Invalid YouTube video URL, channel name, or channel URL"
+                << name;
+            return;
+        }
+        if (videoId)
+        {
+            channelName = *videoId;
+        }
+        else
+        {
+            channelName = name.trimmed();
+        }
+    }
+    const QString channelType = provider == ProviderId::YouTube
+                                    ? QStringLiteral("youtube")
+                                    : QStringLiteral("twitch");
 
     auto mainWindow = std::find_if(this->windows_.begin(), this->windows_.end(),
                                    [](const auto &win) {
@@ -426,8 +455,8 @@ void WindowLayout::activateOrAddChannel(ProviderId provider,
                     TabDescriptor{
                         .selected_ = true,
                         .rootNode_ = SplitNodeDescriptor{{
-                            .type_ = "twitch",
-                            .channelName_ = name,
+                            .type_ = channelType,
+                            .channelName_ = channelName,
                         }},
                     },
                 },
@@ -454,13 +483,15 @@ void WindowLayout::activateOrAddChannel(ProviderId provider,
         // recursive visitor
         struct Visitor {
             const QString &spec;
+            const QString &type;
             size_t score = 0;
             bool hasChannel = false;
 
             void operator()(const SplitNodeDescriptor &split)
             {
                 this->score += 2;
-                if (split.channelName_ == this->spec)
+                if (split.channelName_ == this->spec &&
+                    split.type_ == this->type)
                 {
                     this->hasChannel = true;
                     if (!split.filters_.empty())
@@ -477,7 +508,7 @@ void WindowLayout::activateOrAddChannel(ProviderId provider,
                     std::visit(*this, item);
                 }
             }
-        } visitor{name};
+        } visitor{channelName, channelType};
 
         std::visit(visitor, *tab.rootNode_);
 
@@ -497,8 +528,8 @@ void WindowLayout::activateOrAddChannel(ProviderId provider,
     TabDescriptor tab{
         .selected_ = true,
         .rootNode_ = SplitNodeDescriptor{{
-            .type_ = "twitch",
-            .channelName_ = name,
+            .type_ = channelType,
+            .channelName_ = channelName,
         }},
     };
     mainWindow->tabs_.emplace_back(tab);

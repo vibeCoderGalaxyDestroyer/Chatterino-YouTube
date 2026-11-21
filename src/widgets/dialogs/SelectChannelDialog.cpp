@@ -7,6 +7,7 @@
 #include "Application.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Theme.hpp"
 
@@ -18,6 +19,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTableView>
 #include <QVBoxLayout>
@@ -71,6 +73,25 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
 
     ui.channel->installEventFilter(&this->tabFilter_);
     ui.channelName->installEventFilter(&this->tabFilter_);
+
+    ui.youtube = new AutoCheckedRadioButton("YouTube live chat");
+    layout->addWidget(ui.youtube);
+    ui.youtubeLabel = new QLabel("Enter a live video URL or ID, or a channel "
+                                 "name, @handle, or channel URL");
+    ui.youtubeLabel->setVisible(false);
+    ui.youtubeLabel->setWordWrap(true);
+    layout->addWidget(ui.youtubeLabel);
+    QObject::connect(ui.youtube, &AutoCheckedRadioButton::toggled, this,
+                     [this](bool enabled) {
+                         this->ui_.channelName->setVisible(enabled);
+                         this->ui_.youtubeLabel->setVisible(enabled);
+                         if (enabled)
+                         {
+                             this->ui_.channelName->setFocus();
+                             this->ui_.channelName->selectAll();
+                         }
+                     });
+    ui.youtube->installEventFilter(&this->tabFilter_);
 
     // Whispers
     ui.whispers = new AutoCheckedRadioButton("Whispers");
@@ -178,6 +199,15 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
 
 void SelectChannelDialog::ok()
 {
+    if (this->ui_.youtube->isChecked() &&
+        !YouTubeProvider::isValidInput(this->ui_.channelName->text().trimmed()))
+    {
+        QMessageBox::warning(this, "YouTube live chat",
+                             "Enter a YouTube live video URL or ID, or a "
+                             "channel name, @handle, or channel URL.");
+        return;
+    }
+
     // accept and close
     this->hasSelectedChannel_ = true;
     this->close();
@@ -206,6 +236,11 @@ void SelectChannelDialog::setSelectedChannel(
         case Channel::Type::Twitch: {
             this->ui_.channelName->setText(channel->getName());
             this->ui_.channel->setChecked(true);
+        }
+        break;
+        case Channel::Type::YouTube: {
+            this->ui_.channelName->setText(channel->getName());
+            this->ui_.youtube->setChecked(true);
         }
         break;
         case Channel::Type::TwitchWatching: {
@@ -246,6 +281,12 @@ IndirectChannel SelectChannelDialog::getSelectedChannel() const
     if (this->ui_.channel->isChecked())
     {
         return getApp()->getTwitch()->getOrAddChannel(
+            this->ui_.channelName->text().trimmed());
+    }
+
+    if (this->ui_.youtube->isChecked())
+    {
+        return getApp()->getYouTube()->getOrAddChannel(
             this->ui_.channelName->text().trimmed());
     }
 

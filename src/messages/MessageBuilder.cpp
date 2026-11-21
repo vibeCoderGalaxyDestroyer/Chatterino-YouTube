@@ -1253,6 +1253,32 @@ MessageElement *MessageBuilder::appendOrEmplaceText(
     return back;
 }
 
+void MessageBuilder::appendTextWithEmojis(QStringView text)
+{
+    const std::vector<TwitchSpecialOccurrence> noSpecials;
+    tokenizeWordsWithEmoji(
+        text, noSpecials,
+        variant::Overloaded{
+            [this](TokenizedText token) {
+                this->appendOrEmplaceText(token.text.toString(),
+                                          this->textColor_);
+            },
+            [this](const TokenizedEmoji &token) {
+                this->addEmoji(token.emote);
+            },
+            [this](const TokenizedEmote &token) {
+                this->emplace<EmoteElement>(token.emote,
+                                            MessageElementFlag::Emote,
+                                            this->textColor_)
+                    ->setTrailingSpace(token.trailingSpace);
+            },
+            [this](const TokenizedGif &token) {
+                this->appendOrEmplaceText(token.originalText.toString(),
+                                          this->textColor_);
+            },
+        });
+}
+
 void MessageBuilder::appendOrEmplaceSystemTextAndUpdate(const QString &text,
                                                         QString &toUpdate)
 {

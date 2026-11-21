@@ -152,6 +152,7 @@ public:
     MessageElement *appendOrEmplaceText(
         const QString &text, MessageColor color,
         MessageElementFlags messageFlags = MessageElementFlag::Text);
+    void appendTextWithEmojis(QStringView text);
     void appendOrEmplaceSystemTextAndUpdate(const QString &text,
                                             QString &toUpdate);
 

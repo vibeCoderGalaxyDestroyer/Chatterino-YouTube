@@ -27,6 +27,8 @@
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/Resources.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
@@ -2839,6 +2841,45 @@ void ChannelView::addMessageContextMenuItems(QMenu *menu,
             });
     }
 
+    auto *youtubeChannel = dynamic_cast<YouTubeChannel *>(chan.get());
+    if (!layout->getMessage()->id.isEmpty() && youtubeChannel &&
+        !layout->getMessage()->userID.isEmpty() &&
+        getApp()->getYouTube()->isLoggedIn())
+    {
+        menu->addSeparator();
+        auto *moderateAction = menu->addAction("Mo&derate on YouTube");
+        auto *moderateMenu = new QMenu(menu);
+        moderateAction->setMenu(moderateMenu);
+        const auto messageId = layout->getMessage()->id;
+        const auto userId = layout->getMessage()->userID;
+        moderateMenu->addAction("&Delete message", [youtubeChannel, messageId] {
+            youtubeChannel->deleteMessage(messageId);
+        });
+
+        auto *timeoutAction = moderateMenu->addAction("Time&out user");
+        auto *timeoutMenu = new QMenu(moderateMenu);
+        timeoutAction->setMenu(timeoutMenu);
+        timeoutMenu->addAction("5 minutes", [youtubeChannel, userId] {
+            youtubeChannel->banUser(userId, 5 * 60);
+        });
+        timeoutMenu->addAction("10 minutes", [youtubeChannel, userId] {
+            youtubeChannel->banUser(userId, 10 * 60);
+        });
+        timeoutMenu->addAction("1 hour", [youtubeChannel, userId] {
+            youtubeChannel->banUser(userId, 60 * 60);
+        });
+        moderateMenu->addAction(
+            "Permanently ban user", this, [this, youtubeChannel, userId] {
+                if (QMessageBox::question(
+                        this, "Ban YouTube user",
+                        "Permanently ban this user from the live chat?") ==
+                    QMessageBox::Yes)
+                {
+                    youtubeChannel->banUser(userId, 0);
+                }
+            });
+    }
+
     bool isSearch = this->context_ == Context::Search;
     bool isReplyOrUserCard = (this->context_ == Context::ReplyThread ||
                               this->context_ == Context::UserCard) &&
@@ -3115,6 +3156,7 @@ bool ChannelView::mayContainMessage(const MessagePtr &message)
     {
         case Channel::Type::Direct:
         case Channel::Type::Twitch:
+        case Channel::Type::YouTube:
         case Channel::Type::TwitchWatching:
             // XXX: system messages may not have the channel set
             return message->flags.has(MessageFlag::System) ||
