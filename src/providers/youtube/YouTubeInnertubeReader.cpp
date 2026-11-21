@@ -471,11 +471,14 @@ void YouTubeInnertubeReader::loadWatchPage()
 
             int timeoutMs = 1000;
             this->continuation_ = findContinuation(initialData, &timeoutMs);
+            const bool hasClientConfig = !this->apiKey_.isEmpty() &&
+                                         !this->clientVersion_.isEmpty();
             if (this->bootstrapCallback_)
             {
-                this->bootstrapCallback_(info, !this->continuation_.isEmpty());
+                this->bootstrapCallback_(
+                    info, hasClientConfig && !this->continuation_.isEmpty());
             }
-            if (this->apiKey_.isEmpty() || this->clientVersion_.isEmpty())
+            if (!hasClientConfig)
             {
                 this->reportError(
                     "Could not read YouTube's public chat configuration from the "
