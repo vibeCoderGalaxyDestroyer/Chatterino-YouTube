@@ -7,8 +7,8 @@ channel name, `@handle`, or channel URL to find that channel's active livestream
 
 ## Included in this fork
 
-- Read active YouTube live chat through `liveChatMessages.streamList`, resume
-  from YouTube's page token after a disconnect, and reconnect with backoff.
+- Read public live chat from YouTube's website Innertube endpoint, using the
+  continuation and wait interval supplied by the page.
 - Sign in through Google OAuth in the system browser and send messages as the
   signed-in account.
 - Show paid chat, sticker descriptions, membership events, and author role
@@ -24,44 +24,31 @@ must have an active livestream with chat enabled. Name lookup uses YouTube
 search requests, which consume additional API quota.
 
 The app's local Accounts settings store the API key, OAuth client ID, optional
-OAuth client secret, and OAuth tokens. A Google Cloud project with YouTube Data
-API v3 enabled is needed. Desktop OAuth client secrets are optional in Google's
-standard flow, but this setting is available for projects whose token endpoint
-requires one. Do not share the local Settings folder or embed a user's
-credentials in a distribution build.
-When signed out, enter an API key under **Settings > Accounts** to view public
-chat. When signed in, OAuth is used for reading and posting, so the API key is
-optional. The Desktop OAuth client ID is still needed to sign in. Chatterino
-itself does not request a YouTube password.
-
-This preview does not include a shared API key. Signed-out users must enter
-their own key. A distribution build can remove that per-user step only if its
-publisher supplies an app-owned key; all signed-out viewers would then share
-that project's quota.
+OAuth client secret, and OAuth tokens. Public video links can be read without
+sign-in or a YouTube Data API key. Google OAuth is used for sending messages
+and moderation; a Desktop OAuth client ID is required to sign in. Chatterino
+itself does not request a YouTube password. Channel lookup still uses YouTube
+Data API requests and needs OAuth or an API key. Do not share the local
+Settings folder or embed a user's credentials in a distribution build.
 
 ## API limitations
 
-The public chat API provides message text and event metadata, but not a reusable
-catalog of channel custom emote images or all of YouTube's native sticker art.
-This fork can show the text and sticker description it receives; it cannot
-promise the same emote rendering as youtube.com. Use **Open in YouTube** for
-native rendering and controls outside the API.
+Innertube is an undocumented endpoint used by YouTube's website. YouTube may
+change it or throttle requests, so reading can stop until the client is
+updated. These reads do not use the project's YouTube Data API quota. Channel
+name resolution and OAuth write actions still use official Data API methods and
+consume their documented quota. Direct video links need no API key for reading.
 
-Chat reading uses Google's gRPC `liveChatMessages.streamList` endpoint. It
-pushes messages over a long-lived connection and returns a page token that the
-app uses to resume after a disconnect. Each stream connection costs 5 quota
-units; messages do not each trigger a separate REST poll. Reconnections cost
-another call. Resolving a channel or video, sending chat, and moderation still
-use YouTube Data API requests and consume their documented quota. If Google
-reports quota exhaustion, the app pauses all YouTube chat streams and shows a
-notice in each affected chat. Reconnect after the project's quota is available
-again to resume.
+Innertube provides chat text, role badges, and some event metadata. This fork
+does not yet reproduce every native YouTube badge, custom emoji, or sticker
+image. Use **Open in YouTube** for native rendering and controls outside the
+chat view.
 Chat rows show the YouTube display name and message timestamp in local time.
 Tabs use the channel title rather than the livestream title.
-The API exposes owner, moderator, member, and verified status; these are shown
-as compact badges. Membership months and level names are shown when the API
-includes them in a milestone or membership event. The public API does not expose
-Top Fan rank numbers or custom membership badge artwork.
+Owner, moderator, member, and verified status are shown as compact badges when
+the website includes them in the chat response. Membership months and level
+names are shown when available. Top Fan ranks and native badge artwork are not
+currently reproduced.
 
 Moderator actions and poll creation are shown for a signed-in account. The API
 rejects them if that account lacks permission for the live chat. Studio remains
@@ -71,9 +58,7 @@ broadcast metadata, status, or chat-mode controls.
 ## References
 
 - [YouTube live chat messages](https://developers.google.com/youtube/data/live/reference/rest/v3/liveChatMessages)
-- [YouTube live chat streaming guide](https://developers.google.com/youtube/data/live/streaming-live-chat)
-- [YouTube liveChatMessages.streamList reference](https://developers.google.com/youtube/data/live/reference/rest/v3/liveChatMessages/streamList)
-- [Read and poll live chat messages](https://developers.google.com/youtube/data/live/reference/rest/v3/liveChatMessages/list)
+- [Remahy's Chatterino YouTube chat plugin](https://github.com/Remahy/Chatterino-Plugins/tree/main/yt-chat)
 - [YouTube live chat bans](https://developers.google.com/youtube/data/live/reference/rest/v3/liveChatBans)
 - [YouTube live chat moderators](https://developers.google.com/youtube/data/live/reference/rest/v3/liveChatModerators)
 - [YouTube broadcast API](https://developers.google.com/youtube/data/live/reference/rest/v3/liveBroadcasts)

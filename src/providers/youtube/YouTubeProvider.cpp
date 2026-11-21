@@ -17,7 +17,7 @@
 #include "messages/MessageElement.hpp"
 #include "providers/emoji/Emojis.hpp"
 #include "providers/youtube/YouTubeChannel.hpp"
-#include "providers/youtube/YouTubeLiveChatStream.hpp"
+#include "providers/youtube/YouTubeInnertubeReader.hpp"
 #include "singletons/Settings.hpp"
 
 #include <QColor>
@@ -27,7 +27,6 @@
 #include <QDesktopServices>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QMetaObject>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QTcpSocket>
@@ -35,25 +34,12 @@
 #include <QUrlQuery>
 
 #include <algorithm>
-#include <chrono>
 #include <utility>
 #include <variant>
 
 namespace chatterino {
 
 namespace {
-
-void traceYouTubeProvider(const QString &message)
-{
-    if (!qEnvironmentVariableIsSet("CHATTERINO_YOUTUBE_TRACE"))
-    {
-        return;
-    }
-
-    qInfo().noquote() << QDateTime::currentDateTime().toString(
-                             Qt::ISODateWithMs)
-                      << "[YouTube chat]" << message;
-}
 
 constexpr auto YOUTUBE_API = "https://www.googleapis.com/youtube/v3/";
 constexpr auto YOUTUBE_SCOPE =
@@ -207,24 +193,6 @@ void addApiError(YouTubeChannel *channel, const NetworkResult &result)
         message = result.formatError();
     }
     channel->addSystemMessage("YouTube: " + message);
-}
-
-bool isQuotaExceededError(const NetworkResult &result)
-{
-    const auto error = result.parseJson().value("error").toObject();
-    const auto errors = error.value("errors").toArray();
-    for (const auto &errorValue : errors)
-    {
-        const auto reason = errorValue.toObject().value("reason").toString();
-        if (reason == "quotaExceeded" || reason == "dailyLimitExceeded")
-        {
-            return true;
-        }
-    }
-
-    const auto message = error.value("message").toString();
-    return message.contains("exceeded your quota", Qt::CaseInsensitive) ||
-           message.contains("quota exceeded", Qt::CaseInsensitive);
 }
 
 void sendOAuthResponse(QTcpSocket *socket, int status,
@@ -564,7 +532,7 @@ void YouTubeProvider::ensureApiAccess(YouTubeChannel *channel,
                 }
                 channelPtr->addSystemMessage(
                     "YouTube sign-in expired. Sign in again, or add an API key "
-                    "to view while signed out.");
+                    "to resolve YouTube channels.");
             });
         return;
     }
@@ -572,8 +540,8 @@ void YouTubeProvider::ensureApiAccess(YouTubeChannel *channel,
     if (apiKey.isEmpty())
     {
         channelPtr->addSystemMessage(
-            "Signed-out YouTube viewing needs an API key. Add one in Settings "
-            "> Accounts, or sign in to YouTube.");
+            "YouTube channel lookup needs sign-in or an API key. Direct "
+            "public video links can be viewed without either.");
         return;
     }
     callback();
@@ -584,6 +552,13 @@ void YouTubeProvider::sendMessage(YouTubeChannel *channel,
 {
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
+    if (channelPtr->liveChatId().isEmpty())
+    {
+        channelPtr->addSystemMessage(
+            "YouTube has not provided the official chat ID yet. Wait for "
+            "video details to load, then try again.");
+        return;
+    }
     this->ensureAccessToken([this, channelPtr, message](bool success) {
         if (!success)
         {
@@ -618,6 +593,13 @@ void YouTubeProvider::deleteMessage(YouTubeChannel *channel,
 {
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
+    if (channelPtr->liveChatId().isEmpty())
+    {
+        channelPtr->addSystemMessage(
+            "YouTube has not provided the official chat ID yet. Wait for "
+            "video details to load, then try again.");
+        return;
+    }
     this->ensureAccessToken([this, channelPtr, messageId](bool success) {
         if (!success)
         {
@@ -651,6 +633,13 @@ void YouTubeProvider::banUser(YouTubeChannel *channel, const QString &userId,
     {
         channelPtr->addSystemMessage(
             "YouTube did not provide a channel ID for this user.");
+        return;
+    }
+    if (channelPtr->liveChatId().isEmpty())
+    {
+        channelPtr->addSystemMessage(
+            "YouTube has not provided the official chat ID yet. Wait for "
+            "video details to load, then try again.");
         return;
     }
     this->ensureAccessToken(
@@ -691,6 +680,13 @@ void YouTubeProvider::createPoll(YouTubeChannel *channel,
 {
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
+    if (channelPtr->liveChatId().isEmpty())
+    {
+        channelPtr->addSystemMessage(
+            "YouTube has not provided the official chat ID yet. Wait for "
+            "video details to load, then try again.");
+        return;
+    }
     this->ensureAccessToken(
         [this, channelPtr, question, options](bool success) {
             if (!success)
@@ -823,14 +819,83 @@ void YouTubeProvider::loadVideo(YouTubeChannel *channel)
 {
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
-    this->ensureApiAccess(channel, [this, channelPtr] {
-        if (channelPtr->isChannelLookup())
-        {
+    if (channelPtr->isChannelLookup())
+    {
+        this->ensureApiAccess(channel, [this, channelPtr] {
             this->loadLiveVideoForChannel(channelPtr.get());
-            return;
-        }
-        this->loadVideoDetails(channelPtr.get());
-    });
+        });
+        return;
+    }
+
+    this->startInnertubeReader(channelPtr.get());
+
+    // Innertube supplies public chat without a Data API key. Fetch the
+    // official liveChatId only when OAuth is configured so the existing
+    // send and moderation actions remain available.
+    if (this->isLoggedIn())
+    {
+        this->ensureApiAccess(channel, [this, channelPtr] {
+            this->loadVideoDetails(channelPtr.get());
+        });
+    }
+}
+
+void YouTubeProvider::startInnertubeReader(YouTubeChannel *channel)
+{
+    if (channel->videoId_.isEmpty())
+    {
+        return;
+    }
+    if (channel->reader_)
+    {
+        channel->reader_->stop();
+    }
+
+    auto channelPtr =
+        std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
+    const auto weakChannel = std::weak_ptr<YouTubeChannel>(channelPtr);
+    channel->reader_ = std::make_unique<YouTubeInnertubeReader>(
+        channel->videoId_,
+        [weakChannel](YouTubeInnertubeReader::VideoInfo info,
+                      bool chatAvailable) {
+            auto channel = weakChannel.lock();
+            if (!channel)
+            {
+                return;
+            }
+            if (!info.title.isEmpty())
+            {
+                channel->videoTitle_ = std::move(info.title);
+            }
+            if (!info.channelTitle.isEmpty())
+            {
+                channel->channelTitle_ = std::move(info.channelTitle);
+            }
+            if (!info.thumbnailUrl.isEmpty())
+            {
+                channel->thumbnailUrl_ = std::move(info.thumbnailUrl);
+            }
+            channel->chatAvailable_ = chatAvailable;
+            channel->displayNameChanged.invoke();
+            if (chatAvailable)
+            {
+                channel->addSystemMessage(
+                    "Connected to YouTube live chat using Innertube.");
+            }
+        },
+        [this, weakChannel](QJsonObject root) {
+            if (auto channel = weakChannel.lock())
+            {
+                this->processMessageBatch(channel.get(), root);
+            }
+        },
+        [weakChannel](QString error) {
+            if (auto channel = weakChannel.lock())
+            {
+                channel->addSystemMessage("YouTube chat: " + error);
+            }
+        });
+    channel->reader_->start();
 }
 
 void YouTubeProvider::loadLiveVideoForChannel(YouTubeChannel *channel)
@@ -983,6 +1048,7 @@ void YouTubeProvider::searchLiveVideo(YouTubeChannel *channel,
                 return;
             }
             channelPtr->videoId_ = videoId;
+            this->startInnertubeReader(channelPtr.get());
             this->loadVideoDetails(channelPtr.get());
         })
         .onError([channelPtr](const NetworkResult &result) {
@@ -1054,235 +1120,12 @@ void YouTubeProvider::loadVideoDetails(YouTubeChannel *channel)
             }
             channel->liveChatId_ =
                 liveDetails.value("activeLiveChatId").toString();
-            channel->nextPageToken_.clear();
             channel->displayNameChanged.invoke();
-            if (channel->liveChatId_.isEmpty())
-            {
-                channel->addSystemMessage(
-                    "This YouTube video does not have an active live chat.");
-                return;
-            }
-            channel->addSystemMessage("Connected to YouTube live chat.");
-            channel->provider_->loadMessages(channel);
         })
         .onError([channelPtr](const NetworkResult &result) {
             addApiError(channelPtr.get(), result);
         })
         .execute();
-}
-
-void YouTubeProvider::loadMessages(YouTubeChannel *channel)
-{
-    if (channel->quotaPaused_ || channel->liveChatId().isEmpty() ||
-        channel->stream_ || channel->reconnectTimer_.isActive())
-    {
-        return;
-    }
-
-    auto channelPtr =
-        std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
-    this->ensureApiAccess(channel, [this, channelPtr] {
-        auto *channel = channelPtr.get();
-        if (channel->quotaPaused_ || channel->liveChatId().isEmpty() ||
-            channel->stream_)
-        {
-            return;
-        }
-
-        const auto apiKey = getSettings()->youtubeApiKey.getValue().trimmed();
-        const auto accessToken =
-            getSettings()->youtubeAccessToken.getValue().trimmed();
-        if (apiKey.isEmpty() && accessToken.isEmpty())
-        {
-            return;
-        }
-
-        const auto generation = ++channel->streamGeneration_;
-        const auto weakChannel = std::weak_ptr<YouTubeChannel>(channelPtr);
-        channel->stream_ = std::make_unique<YouTubeLiveChatStream>(
-            channel->liveChatId_, channel->nextPageToken_, apiKey, accessToken,
-            [this, weakChannel, generation](QJsonObject root, QString pageToken,
-                                            QString) {
-                const auto networkReceivedAt = std::chrono::steady_clock::now();
-                const auto batchSize = root.value("items").toArray().size();
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, weakChannel, generation, root = std::move(root),
-                     pageToken = std::move(pageToken), networkReceivedAt,
-                     batchSize]() {
-                        auto channel = weakChannel.lock();
-                        if (!channel ||
-                            channel->streamGeneration_ != generation ||
-                            !channel->stream_)
-                        {
-                            return;
-                        }
-                        const auto uiQueueDelayMs =
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() -
-                                networkReceivedAt)
-                                .count();
-                        traceYouTubeProvider(
-                            QString("batch queued; channel=%1; items=%2; "
-                                    "ui_delay_ms=%3")
-                                .arg(channel->getName())
-                                .arg(batchSize)
-                                .arg(uiQueueDelayMs));
-                        if (!pageToken.isEmpty())
-                        {
-                            channel->nextPageToken_ = pageToken;
-                        }
-                        const auto processingStartedAt =
-                            std::chrono::steady_clock::now();
-                        this->processMessageBatch(channel.get(), root);
-                        const auto processingDurationMs =
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() -
-                                processingStartedAt)
-                                .count();
-                        traceYouTubeProvider(
-                            QString("batch rendered; channel=%1; items=%2; "
-                                    "processing_ms=%3")
-                                .arg(channel->getName())
-                                .arg(batchSize)
-                                .arg(processingDurationMs));
-                    },
-                    Qt::QueuedConnection);
-            },
-            [this, weakChannel, generation](
-                int statusCode, QString error, QString pageToken,
-                QString offlineAt, bool canceled, qint64 connectionDurationMs) {
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, weakChannel, generation, statusCode,
-                     error = std::move(error), pageToken = std::move(pageToken),
-                     offlineAt = std::move(offlineAt), canceled,
-                     connectionDurationMs]() {
-                        auto channel = weakChannel.lock();
-                        if (!channel ||
-                            channel->streamGeneration_ != generation ||
-                            !channel->stream_)
-                        {
-                            return;
-                        }
-                        traceYouTubeProvider(
-                            QString("finish handled; channel=%1; code=%2; "
-                                    "duration_ms=%3; canceled=%4; offline=%5; "
-                                    "error=%6")
-                                .arg(channel->getName())
-                                .arg(statusCode)
-                                .arg(connectionDurationMs)
-                                .arg(canceled ? "yes" : "no")
-                                .arg(offlineAt.isEmpty() ? "no" : "yes")
-                                .arg(error));
-                        if (!pageToken.isEmpty())
-                        {
-                            channel->nextPageToken_ = pageToken;
-                        }
-                        if (connectionDurationMs >= 5 * 60 * 1000)
-                        {
-                            channel->reconnectAttempt_ = 0;
-                        }
-                        channel->stream_.reset();
-                        if (canceled)
-                        {
-                            return;
-                        }
-                        if (!offlineAt.isEmpty())
-                        {
-                            channel->liveChatId_.clear();
-                            channel->addSystemMessage(
-                                "YouTube live chat has ended.");
-                            return;
-                        }
-                        auto normalizedError = error.toLower();
-                        normalizedError.remove(QRegularExpression("<[^>]*>"));
-                        if (normalizedError.contains("quotaexceeded") ||
-                            normalizedError.contains("daily quota") ||
-                            normalizedError.contains("quota exceeded") ||
-                            normalizedError.contains("exceeded your quota") ||
-                            normalizedError.contains("quota has been exceeded"))
-                        {
-                            this->pauseForQuotaExceeded();
-                            return;
-                        }
-                        if (statusCode == 0)
-                        {
-                            // A clean EOF is the normal end of a streamList
-                            // segment. Resume from its page token instead of
-                            // exponentially delaying the next RPC as a failure.
-                            channel->reconnectAttempt_ = 0;
-                            constexpr int minimumDelayForEmptySuccessMs = 1000;
-                            const auto delayMs =
-                                connectionDurationMs <
-                                        minimumDelayForEmptySuccessMs
-                                    ? minimumDelayForEmptySuccessMs
-                                    : 0;
-                            traceYouTubeProvider(
-                                QString("normal RPC completion; channel=%1; "
-                                        "duration_ms=%2; next_delay_ms=%3")
-                                    .arg(channel->getName())
-                                    .arg(connectionDurationMs)
-                                    .arg(delayMs));
-                            channel->reconnectTimer_.start(delayMs);
-                            return;
-                        }
-                        if (statusCode == 5 || statusCode == 9)
-                        {
-                            channel->liveChatId_.clear();
-                            channel->addSystemMessage(
-                                error.isEmpty() ? "YouTube live chat is no "
-                                                  "longer available."
-                                                : "YouTube: " + error);
-                            return;
-                        }
-
-                        if (statusCode == 3 || statusCode == 7)
-                        {
-                            channel->addSystemMessage(
-                                error.isEmpty()
-                                    ? "YouTube rejected the live chat request. "
-                                      "Check the video and account "
-                                      "permissions, "
-                                      "then reconnect."
-                                    : "YouTube chat request rejected: " +
-                                          error);
-                            return;
-                        }
-
-                        if (statusCode == 8)
-                        {
-                            constexpr int rateLimitRetryDelayMs = 5 * 60 * 1000;
-                            const auto delayMs = this->scheduleReconnect(
-                                channel.get(), rateLimitRetryDelayMs);
-                            channel->addSystemMessage(
-                                QString(
-                                    "YouTube temporarily throttled the chat "
-                                    "stream. Retrying in %1 seconds%2")
-                                    .arg((delayMs + 999) / 1000)
-                                    .arg(error.isEmpty()
-                                             ? QStringLiteral(".")
-                                             : QStringLiteral(": ") + error));
-                            return;
-                        }
-
-                        const auto delayMs =
-                            this->scheduleReconnect(channel.get());
-                        if (!error.isEmpty())
-                        {
-                            channel->addSystemMessage(
-                                QString("YouTube chat stream disconnected: %1. "
-                                        "Retrying in %2 seconds.")
-                                    .arg(error)
-                                    .arg((delayMs + 999) / 1000));
-                        }
-                    },
-                    Qt::QueuedConnection);
-            });
-        channel->stream_->start();
-    });
 }
 
 void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
@@ -1534,52 +1377,6 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                                      usernameColor, FontStyle::ChatMediumBold);
         builder.appendTextWithEmojis(text);
         channel->addMessage(builder.release(), MessageContext::Original);
-    }
-}
-
-int YouTubeProvider::scheduleReconnect(YouTubeChannel *channel,
-                                       int minimumDelayMs)
-{
-    if (channel->quotaPaused_ || channel->liveChatId_.isEmpty())
-    {
-        return 0;
-    }
-    constexpr int maximumReconnectDelayMs = 60 * 1000;
-    channel->reconnectAttempt_ = std::min(channel->reconnectAttempt_ + 1, 8);
-    const auto exponent = std::min(channel->reconnectAttempt_ - 1, 6);
-    const auto backoffDelayMs =
-        std::min(maximumReconnectDelayMs, 5000 * (1 << exponent));
-    const auto delayMs = std::max(backoffDelayMs, minimumDelayMs);
-    traceYouTubeProvider(QString("reconnect scheduled; channel=%1; attempt=%2; "
-                                 "delay_ms=%3; minimum_ms=%4")
-                             .arg(channel->getName())
-                             .arg(channel->reconnectAttempt_)
-                             .arg(delayMs)
-                             .arg(minimumDelayMs));
-    channel->reconnectTimer_.start(delayMs);
-    return delayMs;
-}
-
-void YouTubeProvider::pauseForQuotaExceeded()
-{
-    for (auto it = this->channels_.begin(); it != this->channels_.end(); ++it)
-    {
-        auto channel = it.value().lock();
-        if (!channel)
-        {
-            continue;
-        }
-
-        channel->stopStream();
-        if (!channel->quotaPaused_)
-        {
-            channel->quotaPaused_ = true;
-            channel->addSystemMessage(
-                "YouTube API quota has been exceeded. Live chat streams are "
-                "paused for "
-                "all YouTube chats. Reconnect after the project's quota is "
-                "available again.");
-        }
     }
 }
 

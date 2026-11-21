@@ -36,7 +36,7 @@ AccountsPage::AccountsPage()
     auto layout = layoutCreator.emplace<QVBoxLayout>().withoutMargin();
 
     layout.emplace<QLabel>(
-        "YouTube API key (needed for viewing while signed out)");
+        "YouTube API key (for channel lookup; optional for video links)");
     auto *youtubeApiKey = layout.emplace<QLineEdit>().getElement();
     youtubeApiKey->setEchoMode(QLineEdit::Password);
     youtubeApiKey->setText(getSettings()->youtubeApiKey.getValue());

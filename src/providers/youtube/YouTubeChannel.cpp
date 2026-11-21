@@ -4,7 +4,7 @@
 
 #include "providers/youtube/YouTubeChannel.hpp"
 
-#include "providers/youtube/YouTubeLiveChatStream.hpp"
+#include "providers/youtube/YouTubeInnertubeReader.hpp"
 #include "providers/youtube/YouTubeProvider.hpp"
 
 #include <utility>
@@ -22,10 +22,6 @@ YouTubeChannel::YouTubeChannel(QString input, bool channelLookup,
     {
         this->videoId_ = std::move(input);
     }
-    this->reconnectTimer_.setSingleShot(true);
-    QObject::connect(&this->reconnectTimer_, &QTimer::timeout, [this] {
-        this->provider_->loadMessages(this);
-    });
 }
 
 YouTubeChannel::~YouTubeChannel()
@@ -35,7 +31,7 @@ YouTubeChannel::~YouTubeChannel()
 
 bool YouTubeChannel::canSendMessage() const
 {
-    return this->provider_->isLoggedIn();
+    return this->provider_->isLoggedIn() && !this->liveChatId_.isEmpty();
 }
 
 void YouTubeChannel::sendMessage(const QString &message)
@@ -45,7 +41,7 @@ void YouTubeChannel::sendMessage(const QString &message)
 
 bool YouTubeChannel::isLive() const
 {
-    return !this->liveChatId_.isEmpty();
+    return this->chatAvailable_ || !this->liveChatId_.isEmpty();
 }
 
 bool YouTubeChannel::canReconnect() const
@@ -132,8 +128,7 @@ void YouTubeChannel::createPoll(const QString &question,
 void YouTubeChannel::start()
 {
     this->stopStream();
-    this->quotaPaused_ = false;
-    this->reconnectAttempt_ = 0;
+    this->chatAvailable_ = false;
     this->liveChatId_.clear();
     if (this->channelLookup_)
     {
@@ -144,13 +139,12 @@ void YouTubeChannel::start()
 
 void YouTubeChannel::stopStream()
 {
-    ++this->streamGeneration_;
-    this->reconnectTimer_.stop();
-    if (this->stream_)
+    if (this->reader_)
     {
-        auto stream = std::move(this->stream_);
-        stream->stop();
+        auto reader = std::move(this->reader_);
+        reader->stop();
     }
+    this->chatAvailable_ = false;
 }
 
 }  // namespace chatterino

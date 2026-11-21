@@ -499,8 +499,8 @@ set(SOURCE_FILES
         providers/twitch/ChannelPointReward.hpp
         providers/youtube/YouTubeChannel.cpp
         providers/youtube/YouTubeChannel.hpp
-        providers/youtube/YouTubeLiveChatStream.cpp
-        providers/youtube/YouTubeLiveChatStream.hpp
+        providers/youtube/YouTubeInnertubeReader.cpp
+        providers/youtube/YouTubeInnertubeReader.hpp
         providers/youtube/YouTubeProvider.cpp
         providers/youtube/YouTubeProvider.hpp
         providers/twitch/IrcMessageHandler.cpp
@@ -935,32 +935,6 @@ set(SOURCE_FILES
         widgets/splits/PinnedMessageWidget.hpp
         )
 
-# YouTube's streamList live chat endpoint uses gRPC and Protocol Buffers.
-find_package(Protobuf CONFIG REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
-
-set(YOUTUBE_STREAM_PROTO
-    "${CMAKE_CURRENT_SOURCE_DIR}/providers/youtube/stream_list.proto")
-set(YOUTUBE_PROTO_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/youtube")
-set(YOUTUBE_PROTO_SOURCES
-    "${YOUTUBE_PROTO_OUT_DIR}/stream_list.pb.cc"
-    "${YOUTUBE_PROTO_OUT_DIR}/stream_list.grpc.pb.cc")
-set(YOUTUBE_PROTO_HEADERS
-    "${YOUTUBE_PROTO_OUT_DIR}/stream_list.pb.h"
-    "${YOUTUBE_PROTO_OUT_DIR}/stream_list.grpc.pb.h")
-file(MAKE_DIRECTORY "${YOUTUBE_PROTO_OUT_DIR}")
-add_custom_command(
-    OUTPUT ${YOUTUBE_PROTO_SOURCES} ${YOUTUBE_PROTO_HEADERS}
-    COMMAND $<TARGET_FILE:protobuf::protoc>
-        "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}/providers/youtube"
-        "--cpp_out=${YOUTUBE_PROTO_OUT_DIR}"
-        "--grpc_out=${YOUTUBE_PROTO_OUT_DIR}"
-        --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
-        "${YOUTUBE_STREAM_PROTO}"
-    DEPENDS "${YOUTUBE_STREAM_PROTO}"
-    VERBATIM)
-list(APPEND SOURCE_FILES ${YOUTUBE_PROTO_SOURCES} ${YOUTUBE_PROTO_HEADERS})
-
 if (APPLE)
     set(MACOS_BUNDLE_ICON_FILE "${CMAKE_SOURCE_DIR}/resources/chatterino.icns")
     list(APPEND SOURCE_FILES "${MACOS_BUNDLE_ICON_FILE}")
@@ -976,8 +950,6 @@ source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${SOURCE_FILES})
 list(APPEND SOURCE_FILES ${RES_AUTOGEN_FILES})
 
 add_library(${LIBRARY_PROJECT} OBJECT ${SOURCE_FILES})
-target_include_directories(${LIBRARY_PROJECT} PRIVATE "${YOUTUBE_PROTO_OUT_DIR}")
-target_link_libraries(${LIBRARY_PROJECT} PRIVATE gRPC::grpc++ protobuf::libprotobuf)
 
 if (APPLE)
     target_link_libraries(${LIBRARY_PROJECT} PRIVATE

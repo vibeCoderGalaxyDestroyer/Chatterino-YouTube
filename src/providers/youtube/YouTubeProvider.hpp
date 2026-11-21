@@ -44,7 +44,6 @@ public:
     void loadVideoDetails(YouTubeChannel *channel);
     void loadLiveVideoForChannel(YouTubeChannel *channel);
     void searchLiveVideo(YouTubeChannel *channel, const QString &channelId);
-    void loadMessages(YouTubeChannel *channel);
     void deleteMessage(YouTubeChannel *channel, const QString &messageId);
     void banUser(YouTubeChannel *channel, const QString &userId,
                  int durationSeconds);
@@ -63,8 +62,7 @@ private:
 
     void processMessageBatch(YouTubeChannel *channel,
                              const QJsonObject &root);
-    int scheduleReconnect(YouTubeChannel *channel, int minimumDelayMs = 0);
-    void pauseForQuotaExceeded();
+    void startInnertubeReader(YouTubeChannel *channel);
     void exchangeAuthorizationCode(const QString &code,
                                    const QString &redirectUri);
     void refreshAccessToken(std::function<void(bool)> callback);

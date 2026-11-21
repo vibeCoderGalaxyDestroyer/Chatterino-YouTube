@@ -8,15 +8,13 @@
 
 #include <QDateTime>
 #include <QStringList>
-#include <QTimer>
 
-#include <cstdint>
 #include <memory>
 
 namespace chatterino {
 
 class YouTubeProvider;
-class YouTubeLiveChatStream;
+class YouTubeInnertubeReader;
 
 class YouTubeChannel final : public Channel
 {
@@ -51,7 +49,6 @@ private:
     QString videoId_;
     QString lookupInput_;
     QString liveChatId_;
-    QString nextPageToken_;
     QString channelTitle_;
     QString videoTitle_;
     QString thumbnailUrl_;
@@ -59,11 +56,8 @@ private:
     qint64 concurrentViewers_ = -1;
     YouTubeProvider *provider_;
     bool channelLookup_ = false;
-    bool quotaPaused_ = false;
-    QTimer reconnectTimer_;
-    int reconnectAttempt_ = 0;
-    std::uint64_t streamGeneration_ = 0;
-    std::unique_ptr<YouTubeLiveChatStream> stream_;
+    bool chatAvailable_ = false;
+    std::unique_ptr<YouTubeInnertubeReader> reader_;
 
     void start();
     void stopStream();
