@@ -6,10 +6,33 @@ Chatterino 2 is a chat client for [Twitch.tv](https://twitch.tv).
 The Chatterino 2 wiki can be found [here](https://wiki.chatterino.com).
 Contribution guidelines can be found [here](https://wiki.chatterino.com/Contributing%20for%20Developers).
 
+## YouTube live chat in this fork
+
+The `youtube-innertube-preview` branch adds experimental YouTube live-chat support to this Chatterino fork. The upstream Chatterino downloads and the upstream repository do not include these changes.
+
+### Features
+
+- Read public live chat from a YouTube video URL or video ID using YouTube's Innertube live-chat endpoint. Chat reading does not poll the YouTube Data API, so it avoids spending Data API quota on each chat refresh.
+- Show YouTube chat badges, custom and member-only emotes, Super Chats and Super Stickers with their amounts, membership and gift announcements, and reply markers when YouTube provides reply metadata.
+- Show stream details in the chat header, including the title and live thumbnail on hover when available.
+- Sign in with Google OAuth to send messages and use supported moderation actions.
+
+Innertube is an undocumented YouTube interface and may change. OAuth-backed actions and API-based channel lookups still use the YouTube Data API and count toward its quota. A Data API key is optional when opening a direct public video link; it can be used for channel-name lookup while signed out.
+
+### YouTube setup
+
+1. In Google Cloud, enable YouTube Data API v3 for the project used by your OAuth client.
+2. Create a Google OAuth client with the **Desktop app** application type. If the OAuth consent screen is in testing mode, add the Google account you plan to use as a test user.
+3. In Chatterino, open **Settings → Accounts**, enter the OAuth client ID (and client secret if your client configuration requires it), then choose **Sign in to YouTube**.
+4. Paste a YouTube live-video URL or video ID into Chatterino to open its chat. You do not need a Data API key just to read chat from a direct video link.
+
+This repository is private. Anyone cloning it must first be granted access to the GitHub repository.
+
 ## Download
 
 Current releases are available at [https://chatterino.com](https://chatterino.com).
 Windows users can also install Chatterino [from Chocolatey](https://chocolatey.org/packages/chatterino).
+These upstream downloads do not include this fork's YouTube changes.
 
 ## Nightly build
 
@@ -20,17 +43,17 @@ If you still receive an error about `MSVCR120.dll missing`, then you should inst
 
 ## Building
 
-To get source code with required submodules run:
+To build this fork with its required submodules, clone the `youtube-innertube-preview` branch:
 
 ```shell
-git clone --recurse-submodules https://github.com/Chatterino/chatterino2.git
+git clone --branch youtube-innertube-preview --recurse-submodules https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube.git
 ```
 
 or
 
 ```shell
-git clone https://github.com/Chatterino/chatterino2.git
-cd chatterino2
+git clone --branch youtube-innertube-preview https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube.git
+cd Chatterino-YouTube
 git submodule update --init --recursive
 ```
 
