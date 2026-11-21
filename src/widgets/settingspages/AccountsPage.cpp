@@ -71,7 +71,11 @@ AccountsPage::AccountsPage()
         {
             if (provider->isLoggedIn())
             {
-                status->setText("YouTube: signed in");
+                const auto accountName = provider->accountName();
+                status->setText(
+                    accountName.isEmpty()
+                        ? QString("YouTube: signed in")
+                        : QString("YouTube: signed in as %1").arg(accountName));
             }
             else if (!provider->authError().isEmpty())
             {

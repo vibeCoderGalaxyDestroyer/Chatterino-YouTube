@@ -3496,6 +3496,11 @@ bool ChannelView::canReplyToMessages() const
 
     assert(this->channel_ != nullptr);
 
+    if (this->channel_->isYouTubeChannel())
+    {
+        return true;
+    }
+
     if (!this->channel_->isTwitchChannel())
     {
         return false;

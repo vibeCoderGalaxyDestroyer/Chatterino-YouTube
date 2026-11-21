@@ -1155,6 +1155,7 @@ void SplitHeader::updateChannelText()
     else if (auto *youtubeChannel =
                  dynamic_cast<YouTubeChannel *>(channel.get()))
     {
+        title.prepend("(YT) ");
         this->isLive_ = youtubeChannel->isLive();
         if (this->isLive_)
         {

@@ -11,6 +11,7 @@
 #include "common/QLogging.hpp"
 #include "controllers/emotes/EmoteController.hpp"
 #include "messages/Emote.hpp"
+#include "messages/Image.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageColor.hpp"
@@ -36,6 +37,7 @@
 #include <algorithm>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace chatterino {
 
@@ -183,6 +185,19 @@ QByteArray formBody(const QUrlQuery &form)
     return form.toString(QUrl::FullyEncoded).toUtf8();
 }
 
+QColor colorFromYouTube(const QJsonValue &value)
+{
+    if (value.isString())
+    {
+        return QColor(value.toString());
+    }
+    if (value.isDouble())
+    {
+        return QColor::fromRgba(static_cast<QRgb>(value.toInteger()));
+    }
+    return {};
+}
+
 void addApiError(YouTubeChannel *channel, const NetworkResult &result)
 {
     auto response = result.parseJson();
@@ -288,6 +303,13 @@ YouTubeProvider::YouTubeProvider()
                     });
             }
         });
+
+    if (this->isLoggedIn() &&
+        getSettings()->youtubeAccountName.getValue().isEmpty() &&
+        !getSettings()->youtubeAccountNameLookupAttempted.getValue())
+    {
+        this->loadAccountName();
+    }
 }
 
 YouTubeProvider::~YouTubeProvider()
@@ -305,6 +327,11 @@ bool YouTubeProvider::isLoggedIn() const
 {
     return !getSettings()->youtubeRefreshToken.getValue().isEmpty() ||
            !getSettings()->youtubeAccessToken.getValue().isEmpty();
+}
+
+QString YouTubeProvider::accountName() const
+{
+    return getSettings()->youtubeAccountName.getValue();
 }
 
 QString YouTubeProvider::authError() const
@@ -382,6 +409,10 @@ void YouTubeProvider::logout()
     getSettings()->youtubeAccessToken.setValue({});
     getSettings()->youtubeRefreshToken.setValue({});
     getSettings()->youtubeTokenExpiry.setValue(0);
+    getSettings()->youtubeAccountName.setValue({});
+    getSettings()->youtubeAccountNameLookupAttempted.setValue(false);
+    ++this->accountNameRequestId_;
+    this->accountNameLookupInProgress_ = false;
     this->authError_.clear();
     this->authChanged.invoke();
 }
@@ -434,7 +465,12 @@ void YouTubeProvider::exchangeAuthorizationCode(const QString &code,
             getSettings()->youtubeTokenExpiry.setValue(
                 static_cast<int>(QDateTime::currentSecsSinceEpoch() +
                                  token.value("expires_in").toInt()));
+            getSettings()->youtubeAccountName.setValue({});
+            getSettings()->youtubeAccountNameLookupAttempted.setValue(false);
+            ++this->accountNameRequestId_;
+            this->accountNameLookupInProgress_ = false;
             this->authChanged.invoke();
+            this->loadAccountName();
         })
         .onError([this](const NetworkResult &result) {
             const auto response = result.parseJson();
@@ -512,6 +548,75 @@ void YouTubeProvider::ensureAccessToken(std::function<void(bool)> callback)
         return;
     }
     this->refreshAccessToken(std::move(callback));
+}
+
+void YouTubeProvider::loadAccountName()
+{
+    auto *settings = getSettings();
+    if (!this->isLoggedIn() || this->accountNameLookupInProgress_ ||
+        settings->youtubeAccountNameLookupAttempted.getValue())
+    {
+        return;
+    }
+
+    this->accountNameLookupInProgress_ = true;
+    const auto requestId = this->accountNameRequestId_;
+    this->ensureAccessToken([this, settings, requestId](bool success) {
+        if (requestId != this->accountNameRequestId_)
+        {
+            return;
+        }
+        if (!success || !this->isLoggedIn())
+        {
+            this->accountNameLookupInProgress_ = false;
+            return;
+        }
+
+        QUrlQuery query;
+        query.addQueryItem("part", "snippet");
+        query.addQueryItem("mine", "true");
+        auto request = makeApiRequest("channels", query);
+        std::move(request)
+            .caller(this)
+            .onSuccess([this, settings,
+                        requestId](const NetworkResult &result) {
+                if (requestId != this->accountNameRequestId_ ||
+                    !this->isLoggedIn())
+                {
+                    return;
+                }
+                this->accountNameLookupInProgress_ = false;
+                settings->youtubeAccountNameLookupAttempted.setValue(true);
+
+                const auto items = result.parseJson().value("items").toArray();
+                QString accountName;
+                if (!items.isEmpty())
+                {
+                    accountName = items.at(0)
+                                      .toObject()
+                                      .value("snippet")
+                                      .toObject()
+                                      .value("title")
+                                      .toString()
+                                      .trimmed();
+                }
+                settings->youtubeAccountName.setValue(accountName);
+                this->authChanged.invoke();
+            })
+            .onError([this, settings, requestId](const NetworkResult &result) {
+                if (requestId != this->accountNameRequestId_ ||
+                    !this->isLoggedIn())
+                {
+                    return;
+                }
+                this->accountNameLookupInProgress_ = false;
+                settings->youtubeAccountNameLookupAttempted.setValue(true);
+                qCWarning(chatterinoCommon)
+                    << "Could not load the signed-in YouTube channel name:"
+                    << result.formatError();
+            })
+            .execute();
+    });
 }
 
 void YouTubeProvider::ensureApiAccess(YouTubeChannel *channel,
@@ -1132,12 +1237,235 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                                           const QJsonObject &root)
 {
     const auto items = root.value("items").toArray();
+    auto getCustomEmoji = [this](const QJsonObject &run) -> EmotePtr {
+        struct Thumbnail {
+            QString url;
+            QSize size;
+        };
+
+        const auto emojiId = run.value("emojiId").toString();
+        const auto fallbackName = run.value("text").toString();
+        const auto label = run.value("label").toString();
+        std::vector<Thumbnail> thumbnails;
+        for (const auto &thumbnailValue : run.value("thumbnails").toArray())
+        {
+            const auto thumbnail = thumbnailValue.toObject();
+            auto url = thumbnail.value("url").toString();
+            if (url.startsWith("//"))
+            {
+                url.prepend("https:");
+            }
+
+            const QUrl parsedUrl(url);
+            const auto host = parsedUrl.host().toLower();
+            const bool youtubeImageHost =
+                host == "ggpht.com" || host.endsWith(".ggpht.com") ||
+                host == "googleusercontent.com" ||
+                host.endsWith(".googleusercontent.com");
+            if (parsedUrl.scheme() != "https" || !youtubeImageHost)
+            {
+                continue;
+            }
+
+            auto width = thumbnail.value("width").toInt();
+            auto height = thumbnail.value("height").toInt();
+            if (width <= 0 || height <= 0)
+            {
+                width = 64;
+                height = 64;
+            }
+            thumbnails.push_back({std::move(url), QSize(width, height)});
+        }
+        if (thumbnails.empty())
+        {
+            return {};
+        }
+
+        std::sort(thumbnails.begin(), thumbnails.end(),
+                  [](const auto &a, const auto &b) {
+                      return a.size.width() * a.size.height() <
+                             b.size.width() * b.size.height();
+                  });
+
+        const auto cacheKey = emojiId + "|" + thumbnails.back().url;
+        if (const auto cached = this->customEmotes_.constFind(cacheKey);
+            cached != this->customEmotes_.cend())
+        {
+            return cached.value();
+        }
+
+        std::vector<Thumbnail> selectedThumbnails;
+        if (thumbnails.size() <= 3)
+        {
+            selectedThumbnails = std::move(thumbnails);
+        }
+        else
+        {
+            selectedThumbnails = {thumbnails.front(),
+                                  thumbnails[thumbnails.size() / 2],
+                                  thumbnails.back()};
+        }
+
+        auto makeImage = [](const Thumbnail &thumbnail) {
+            const auto largestDimension =
+                std::max(thumbnail.size.width(), thumbnail.size.height());
+            const qreal scale = 24.0 / largestDimension;
+            return Image::fromUrl({thumbnail.url}, scale, thumbnail.size);
+        };
+        auto image1 = Image::getEmpty();
+        auto image2 = Image::getEmpty();
+        auto image3 = Image::getEmpty();
+        if (!selectedThumbnails.empty())
+        {
+            image1 = makeImage(selectedThumbnails[0]);
+        }
+        if (selectedThumbnails.size() >= 2)
+        {
+            image2 = makeImage(selectedThumbnails[1]);
+        }
+        if (selectedThumbnails.size() >= 3)
+        {
+            image3 = makeImage(selectedThumbnails[2]);
+        }
+
+        const auto emoteName = emojiId.isEmpty() ? fallbackName : emojiId;
+        const auto tooltipText = label.isEmpty() ? emoteName : label;
+        auto emote = std::make_shared<Emote>(Emote{
+            .name = EmoteName{emoteName},
+            .images = ImageSet{image1, image2, image3},
+            .tooltip = Tooltip{QString("YouTube member emote<br>%1")
+                                   .arg(tooltipText.toHtmlEscaped())},
+            .homePage = Url{"https://www.youtube.com/"},
+            .zeroWidth = false,
+            .id = EmoteId{emojiId.isEmpty() ? cacheKey : emojiId},
+            .author = {},
+        });
+        this->customEmotes_.insert(cacheKey, emote);
+        return emote;
+    };
+    auto getMembershipBadge = [this](const QJsonArray &badges) -> EmotePtr {
+        struct Thumbnail {
+            QString url;
+            QSize size;
+        };
+
+        for (const auto &badgeValue : badges)
+        {
+            const auto badge = badgeValue.toObject();
+            if (!badge.value("isMember").toBool())
+            {
+                continue;
+            }
+
+            std::vector<Thumbnail> thumbnails;
+            for (const auto &thumbnailValue :
+                 badge.value("thumbnails").toArray())
+            {
+                const auto thumbnail = thumbnailValue.toObject();
+                auto url = thumbnail.value("url").toString();
+                if (url.startsWith("//"))
+                {
+                    url.prepend("https:");
+                }
+                const QUrl parsedUrl(url);
+                const auto host = parsedUrl.host().toLower();
+                const bool youtubeImageHost =
+                    host == "ggpht.com" || host.endsWith(".ggpht.com") ||
+                    host == "googleusercontent.com" ||
+                    host.endsWith(".googleusercontent.com");
+                if (parsedUrl.scheme() != "https" || !youtubeImageHost)
+                {
+                    continue;
+                }
+
+                auto width = thumbnail.value("width").toInt();
+                auto height = thumbnail.value("height").toInt();
+                if (width <= 0 || height <= 0)
+                {
+                    width = 48;
+                    height = 48;
+                }
+                thumbnails.push_back({std::move(url), QSize(width, height)});
+            }
+            if (thumbnails.empty())
+            {
+                continue;
+            }
+
+            std::sort(thumbnails.begin(), thumbnails.end(),
+                      [](const auto &a, const auto &b) {
+                          return a.size.width() * a.size.height() <
+                                 b.size.width() * b.size.height();
+                      });
+            const auto cacheKey = "member-badge|" + thumbnails.back().url;
+            if (const auto cached = this->customEmotes_.constFind(cacheKey);
+                cached != this->customEmotes_.cend())
+            {
+                return cached.value();
+            }
+
+            std::vector<Thumbnail> selectedThumbnails;
+            if (thumbnails.size() <= 3)
+            {
+                selectedThumbnails = std::move(thumbnails);
+            }
+            else
+            {
+                selectedThumbnails = {thumbnails.front(),
+                                      thumbnails[thumbnails.size() / 2],
+                                      thumbnails.back()};
+            }
+
+            auto makeImage = [](const Thumbnail &thumbnail) {
+                const auto largestDimension =
+                    std::max(thumbnail.size.width(), thumbnail.size.height());
+                const qreal scale = 18.0 / largestDimension;
+                return Image::fromUrl({thumbnail.url}, scale, thumbnail.size);
+            };
+            auto image1 = Image::getEmpty();
+            auto image2 = Image::getEmpty();
+            auto image3 = Image::getEmpty();
+            if (!selectedThumbnails.empty())
+            {
+                image1 = makeImage(selectedThumbnails[0]);
+            }
+            if (selectedThumbnails.size() >= 2)
+            {
+                image2 = makeImage(selectedThumbnails[1]);
+            }
+            if (selectedThumbnails.size() >= 3)
+            {
+                image3 = makeImage(selectedThumbnails[2]);
+            }
+
+            auto tooltip = badge.value("tooltip").toString().trimmed();
+            if (tooltip.isEmpty())
+            {
+                tooltip = "YouTube channel membership badge";
+            }
+            auto emote = std::make_shared<Emote>(Emote{
+                .name = EmoteName{"YouTube member badge"},
+                .images = ImageSet{image1, image2, image3},
+                .tooltip = Tooltip{tooltip.toHtmlEscaped()},
+                .homePage = Url{"https://www.youtube.com/"},
+                .zeroWidth = false,
+                .id = EmoteId{cacheKey},
+                .author = {},
+            });
+            this->customEmotes_.insert(cacheKey, emote);
+            return emote;
+        }
+        return {};
+    };
+
     for (const auto &itemValue : items)
     {
         const auto item = itemValue.toObject();
         const auto snippet = item.value("snippet").toObject();
         const auto author = item.value("authorDetails").toObject();
         const auto type = snippet.value("type").toString();
+        const auto superChatDetails =
+            snippet.value("superChatDetails").toObject();
         QString text = snippet.value("displayMessage").toString();
         if (type == "textMessageEvent")
         {
@@ -1148,10 +1476,8 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         }
         if (type == "superChatEvent")
         {
-            const auto amount = snippet.value("superChatDetails")
-                                    .toObject()
-                                    .value("amountDisplayString")
-                                    .toString();
+            const auto amount =
+                superChatDetails.value("amountDisplayString").toString();
             text.prepend(amount.isEmpty() ? "[Super Chat] "
                                           : "[Super Chat " + amount + "] ");
         }
@@ -1275,6 +1601,26 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         builder->displayName = authorName;
         builder->userID = authorId;
         builder->channelName = channel->getName();
+        if (type == "superChatEvent")
+        {
+            auto backgroundColor =
+                colorFromYouTube(superChatDetails.value("bodyBackgroundColor"));
+            if (!backgroundColor.isValid() || backgroundColor.alpha() == 0)
+            {
+                backgroundColor = QColor("#00E5FF");
+            }
+            builder->flags.set(MessageFlag::Highlighted);
+            builder->highlightColor = std::make_shared<QColor>(backgroundColor);
+        }
+        else if (type == "newSponsorEvent" ||
+                 type == "membershipGiftingEvent" ||
+                 type == "giftMembershipReceivedEvent")
+        {
+            // YouTube highlights membership welcome and gift announcements.
+            builder->flags.set(MessageFlag::Highlighted);
+            builder->highlightColor =
+                std::make_shared<QColor>(QColor("#13A567"));
+        }
         auto publishedAt = QDateTime::fromString(
             snippet.value("publishedAt").toString(), Qt::ISODate);
         if (!publishedAt.isValid())
@@ -1328,6 +1674,21 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         {
             usernameColor = QColor("#21a67a");
         }
+        if (type == "superChatEvent")
+        {
+            const auto paidUsernameColor =
+                colorFromYouTube(superChatDetails.value("authorNameTextColor"));
+            if (paidUsernameColor.isValid() && paidUsernameColor.alpha() > 0)
+            {
+                usernameColor = paidUsernameColor;
+            }
+        }
+        else if (type == "newSponsorEvent" ||
+                 type == "membershipGiftingEvent" ||
+                 type == "giftMembershipReceivedEvent")
+        {
+            usernameColor = QColor("#ffffff");
+        }
         if (isOwner)
         {
             appendYouTubeBadge("👑", "YouTube broadcaster",
@@ -1349,8 +1710,17 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             {
                 tooltip += QString(" — %1 months").arg(memberMonth);
             }
-            appendYouTubeBadge("💠", tooltip,
-                               MessageElementFlag::BadgeSubscription);
+            if (const auto memberBadge =
+                    getMembershipBadge(author.value("badges").toArray()))
+            {
+                builder.emplace<BadgeElement>(
+                    memberBadge, MessageElementFlag::BadgeSubscription);
+            }
+            else
+            {
+                appendYouTubeBadge("💠", tooltip,
+                                   MessageElementFlag::BadgeSubscription);
+            }
             if (!memberLevel.isEmpty())
             {
                 builder
@@ -1375,7 +1745,51 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         builder.emplace<TextElement>(authorName + ':',
                                      MessageElementFlag::Username,
                                      usernameColor, FontStyle::ChatMediumBold);
-        builder.appendTextWithEmojis(text);
+        const auto replyTargetName =
+            snippet.value("replyTargetName").toString();
+        if (!replyTargetName.isEmpty())
+        {
+            builder.appendTextWithEmojis("💬 " + replyTargetName + ' ');
+        }
+        const auto messageRuns = snippet.value("messageRuns").toArray();
+        if (messageRuns.isEmpty())
+        {
+            builder.appendTextWithEmojis(text);
+        }
+        else
+        {
+            if (type == "superChatEvent")
+            {
+                const auto amount =
+                    superChatDetails.value("amountDisplayString").toString();
+                builder.appendTextWithEmojis(amount.isEmpty()
+                                                 ? QStringLiteral("[Super Chat] ")
+                                                 : amount + ' ');
+            }
+            for (const auto &runValue : messageRuns)
+            {
+                const auto run = runValue.toObject();
+                const auto runText = run.value("text").toString();
+                if (run.value("isCustomEmoji").toBool())
+                {
+                    const auto emoji = getCustomEmoji(run);
+                    if (emoji)
+                    {
+                        builder.emplace<EmoteElement>(
+                            emoji, MessageElementFlag::EmojiAll);
+                    }
+                    else if (!runText.isEmpty())
+                    {
+                        builder.appendTextWithEmojis(runText);
+                    }
+                    continue;
+                }
+                if (!runText.isEmpty())
+                {
+                    builder.appendTextWithEmojis(runText);
+                }
+            }
+        }
         channel->addMessage(builder.release(), MessageContext::Original);
     }
 }

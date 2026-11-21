@@ -79,6 +79,33 @@ QJsonObject embeddedJsonObject(const QByteArray &source,
     return {};
 }
 
+QString emojiText(const QJsonObject &emoji)
+{
+    const auto emojiId = emoji.value("emojiId").toString();
+    if (!emoji.value("isCustomEmoji").toBool() && !emojiId.isEmpty())
+    {
+        return emojiId;
+    }
+
+    const auto accessibility =
+        emoji.value("image").toObject().value("accessibility").toObject();
+    const auto label = accessibility.value("accessibilityData")
+                           .toObject()
+                           .value("label")
+                           .toString();
+    if (!label.isEmpty())
+    {
+        return label;
+    }
+
+    const auto shortcuts = emoji.value("shortcuts").toArray();
+    if (!shortcuts.isEmpty())
+    {
+        return shortcuts.first().toString();
+    }
+    return emojiId;
+}
+
 QString textValue(const QJsonValue &value)
 {
     if (value.isString())
@@ -103,29 +130,49 @@ QString textValue(const QJsonValue &value)
             continue;
         }
 
-        const auto emoji = run.value("emoji").toObject();
-        const auto accessibility =
-            emoji.value("image").toObject().value("accessibility").toObject();
-        const auto label = accessibility.value("accessibilityData")
-                               .toObject()
-                               .value("label")
-                               .toString();
-        if (!label.isEmpty())
-        {
-            text += label;
-            continue;
-        }
-        const auto shortcuts = emoji.value("shortcuts").toArray();
-        if (!shortcuts.isEmpty())
-        {
-            text += shortcuts.first().toString();
-        }
-        else
-        {
-            text += emoji.value("emojiId").toString();
-        }
+        text += emojiText(run.value("emoji").toObject());
     }
     return text;
+}
+
+QJsonArray normalizeMessageRuns(const QJsonValue &value)
+{
+    QJsonArray normalized;
+    const auto runs = value.toObject().value("runs").toArray();
+    for (const auto &runValue : runs)
+    {
+        const auto run = runValue.toObject();
+        const auto text = run.value("text").toString();
+        if (!text.isEmpty())
+        {
+            normalized.append(QJsonObject{{"text", text}});
+            continue;
+        }
+
+        const auto emoji = run.value("emoji").toObject();
+        if (emoji.isEmpty())
+        {
+            continue;
+        }
+
+        QJsonObject normalizedRun{{"text", emojiText(emoji)}};
+        if (emoji.value("isCustomEmoji").toBool())
+        {
+            const auto image = emoji.value("image").toObject();
+            const auto accessibility = image.value("accessibility").toObject();
+            const auto label = accessibility.value("accessibilityData")
+                                   .toObject()
+                                   .value("label")
+                                   .toString();
+            normalizedRun.insert("isCustomEmoji", true);
+            normalizedRun.insert("emojiId", emoji.value("emojiId"));
+            normalizedRun.insert("label", label);
+            normalizedRun.insert("thumbnails",
+                                 image.value("thumbnails").toArray());
+        }
+        normalized.append(normalizedRun);
+    }
+    return normalized;
 }
 
 QString continuationFromObject(const QJsonObject &object, int *timeoutMs)
@@ -254,12 +301,54 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
             }
         }
     }
+    if (renderer.isEmpty())
+    {
+        renderer = item.value(
+            "liveChatSponsorshipsGiftPurchaseAnnouncementRenderer")
+                       .toObject();
+        if (!renderer.isEmpty())
+        {
+            type = "membershipGiftingEvent";
+            const auto header = renderer.value("header").toObject();
+            const auto headerRenderer =
+                header.value("liveChatSponsorshipsHeaderRenderer").toObject();
+            const auto giftHeader =
+                headerRenderer.isEmpty() ? header : headerRenderer;
+            message = textValue(giftHeader.value("primaryText"));
+        }
+    }
+    if (renderer.isEmpty())
+    {
+        renderer = item.value(
+            "liveChatSponsorshipsGiftRedemptionAnnouncementRenderer")
+                       .toObject();
+        if (!renderer.isEmpty())
+        {
+            type = "giftMembershipReceivedEvent";
+            message = textValue(renderer.value("message"));
+        }
+    }
     if (renderer.isEmpty() || type.isEmpty())
     {
         return {};
     }
 
-    const auto authorName = textValue(renderer.value("authorName"));
+    auto authorName = textValue(renderer.value("authorName"));
+    auto authorChannelId =
+        renderer.value("authorExternalChannelId").toString();
+    QJsonArray authorBadges = renderer.value("authorBadges").toArray();
+    QJsonValue messageValue = renderer.value("message");
+    if (type == "membershipGiftingEvent")
+    {
+        const auto header = renderer.value("header").toObject();
+        const auto headerRenderer =
+            header.value("liveChatSponsorshipsHeaderRenderer").toObject();
+        const auto giftHeader =
+            headerRenderer.isEmpty() ? header : headerRenderer;
+        authorName = textValue(giftHeader.value("authorName"));
+        authorBadges = giftHeader.value("authorBadges").toArray();
+        messageValue = giftHeader.value("primaryText");
+    }
     const auto publishedAtUsec = renderer.value("timestampUsec").toString();
     bool timestampOk = false;
     const auto publishedAtMs = publishedAtUsec.toLongLong(&timestampOk) / 1000;
@@ -273,7 +362,8 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
     bool isModerator = false;
     bool isMember = false;
     bool isVerified = false;
-    for (const auto &badgeValue : renderer.value("authorBadges").toArray())
+    QJsonArray normalizedAuthorBadges;
+    for (const auto &badgeValue : authorBadges)
     {
         const auto badge =
             badgeValue.toObject().value("liveChatAuthorBadgeRenderer").toObject();
@@ -283,12 +373,23 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
                                   .value("iconType")
                                   .toString()
                                   .toUpper();
+        const bool isMemberBadge =
+            iconType == "SPONSOR" || tooltip.contains("member") ||
+            tooltip.contains("sponsor");
+        normalizedAuthorBadges.append(QJsonObject{
+            {"tooltip", badge.value("tooltip")},
+            {"iconType", iconType},
+            {"isMember", isMemberBadge},
+            {"thumbnails", badge.value("customThumbnail")
+                                .toObject()
+                                .value("thumbnails")
+                                .toArray()},
+        });
         isOwner = isOwner || iconType == "OWNER" ||
                   tooltip.contains("owner") || tooltip.contains("broadcaster");
         isModerator = isModerator || iconType == "MODERATOR" ||
                       tooltip.contains("moderator");
-        isMember = isMember || iconType == "SPONSOR" ||
-                   tooltip.contains("member") || tooltip.contains("sponsor");
+        isMember = isMember || isMemberBadge;
         isVerified = isVerified || iconType == "VERIFIED" ||
                      tooltip.contains("verified");
         if (memberLevel.isEmpty() && isMember)
@@ -306,6 +407,42 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
         {"publishedAt", publishedAt},
         {"displayMessage", message},
     };
+    const auto messageRuns = normalizeMessageRuns(messageValue);
+    if (!messageRuns.isEmpty())
+    {
+        snippet.insert("messageRuns", messageRuns);
+    }
+    QJsonArray beforeContentButtons =
+        renderer.value("beforeContentButtons").toArray();
+    for (const auto &buttonValue : beforeContentButtons)
+    {
+        const auto button = buttonValue.toObject();
+        const auto viewModel = button.value("buttonViewModel").toObject();
+        const auto buttonData = viewModel.isEmpty() ? button : viewModel;
+        auto title = buttonData.value("title").toString().trimmed();
+        if (title.isEmpty())
+        {
+            title = textValue(buttonData.value("titleFormatted")).trimmed();
+        }
+        const auto iconName = buttonData.value("iconName").toString();
+        const auto accessibilityText =
+            buttonData.value("accessibilityText").toString();
+        const auto tooltip = buttonData.value("tooltip").toString();
+        const auto buttonDescription =
+            (iconName + ' ' + accessibilityText + ' ' + tooltip).toLower();
+        const bool isReplyButton =
+            title.startsWith('@') || buttonDescription.contains("reply");
+        if (isReplyButton && !title.isEmpty() &&
+            !title.contains("reply", Qt::CaseInsensitive))
+        {
+            if (!title.startsWith('@'))
+            {
+                title.prepend('@');
+            }
+            snippet.insert("replyTargetName", title);
+            break;
+        }
+    }
     if (type == "textMessageEvent")
     {
         snippet.insert("textMessageDetails",
@@ -313,8 +450,13 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
     }
     else if (type == "superChatEvent")
     {
-        snippet.insert("superChatDetails",
-                       QJsonObject{{"amountDisplayString", amount}});
+        snippet.insert(
+            "superChatDetails",
+            QJsonObject{
+                {"amountDisplayString", amount},
+                {"bodyBackgroundColor", renderer.value("bodyBackgroundColor")},
+                {"authorNameTextColor", renderer.value("authorNameTextColor")},
+            });
     }
     else if (type == "superStickerEvent")
     {
@@ -329,12 +471,13 @@ QJsonObject normalizeChatItem(const QJsonObject &item)
     }
 
     QJsonObject author{
-        {"channelId", renderer.value("authorExternalChannelId").toString()},
+        {"channelId", authorChannelId},
         {"displayName", authorName},
         {"isChatOwner", isOwner},
         {"isChatModerator", isModerator},
         {"isChatSponsor", isMember},
         {"isVerified", isVerified},
+        {"badges", normalizedAuthorBadges},
     };
 
     return QJsonObject{

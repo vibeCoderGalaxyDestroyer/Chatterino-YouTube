@@ -656,6 +656,9 @@ public:
     QStringSetting youtubeAccessToken = {"/accounts/youtube/accessToken", ""};
     QStringSetting youtubeRefreshToken = {"/accounts/youtube/refreshToken", ""};
     IntSetting youtubeTokenExpiry = {"/accounts/youtube/tokenExpiry", 0};
+    QStringSetting youtubeAccountName = {"/accounts/youtube/accountName", ""};
+    BoolSetting youtubeAccountNameLookupAttempted = {
+        "/accounts/youtube/accountNameLookupAttempted", false};
     IntSetting twitchMessageHistoryLimit = {
         "/misc/twitch/messageHistoryLimit",
         800,

@@ -9,6 +9,7 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
+#include "providers/youtube/YouTubeProvider.hpp"
 #include "singletons/Settings.hpp"
 
 namespace chatterino {
@@ -18,36 +19,20 @@ AccountSwitchWidget::AccountSwitchWidget(QWidget *parent)
 {
     auto *app = getApp();
 
-    this->addItem(ANONYMOUS_USERNAME_LABEL);
-
-    for (const auto &userName : app->getAccounts()->twitch.getUsernames())
-    {
-        this->addItem(userName);
-    }
+    this->populateAccounts();
 
     this->managedConnections_.managedConnect(
-        app->getAccounts()->twitch.userListUpdated, [=, this]() {
-            this->blockSignals(true);
-
-            this->clear();
-
-            this->addItem(ANONYMOUS_USERNAME_LABEL);
-
-            for (const auto &userName :
-                 app->getAccounts()->twitch.getUsernames())
-            {
-                this->addItem(userName);
-            }
-
-            this->refreshSelection();
-
-            this->blockSignals(false);
+        app->getAccounts()->twitch.userListUpdated, [this] {
+            this->populateAccounts();
         });
-
-    this->refreshSelection();
+    this->managedConnections_.managedConnect(app->getYouTube()->authChanged,
+                                             [this] {
+                                                 this->populateAccounts();
+                                             });
 
     QObject::connect(this, &QListWidget::clicked, [=, this] {
-        if (!this->selectedItems().isEmpty())
+        if (!this->selectedItems().isEmpty() && this->currentItem() &&
+            this->currentItem()->flags().testFlag(Qt::ItemIsSelectable))
         {
             QString newUsername = this->currentItem()->text();
             if (newUsername.compare(ANONYMOUS_USERNAME_LABEL,
@@ -67,7 +52,34 @@ AccountSwitchWidget::AccountSwitchWidget(QWidget *parent)
 
 void AccountSwitchWidget::refresh()
 {
+    this->populateAccounts();
+}
+
+void AccountSwitchWidget::populateAccounts()
+{
+    auto *app = getApp();
+    this->blockSignals(true);
+    this->clear();
+    this->addItem(ANONYMOUS_USERNAME_LABEL);
+
+    for (const auto &userName : app->getAccounts()->twitch.getUsernames())
+    {
+        this->addItem(userName);
+    }
+
+    if (app->getYouTube()->isLoggedIn())
+    {
+        const auto accountName = app->getYouTube()->accountName();
+        const auto label = accountName.isEmpty()
+                               ? QString("YouTube: signed in")
+                               : QString("YouTube: %1").arg(accountName);
+        auto *item = new QListWidgetItem(label);
+        item->setFlags(Qt::ItemIsEnabled);
+        this->addItem(item);
+    }
+
     this->refreshSelection();
+    this->blockSignals(false);
 }
 
 void AccountSwitchWidget::refreshSelection()

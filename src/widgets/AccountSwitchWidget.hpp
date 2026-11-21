@@ -20,6 +20,7 @@ public:
     void refresh();
 
 private:
+    void populateAccounts();
     void refreshSelection();
 
     pajlada::Signals::SignalHolder managedConnections_;

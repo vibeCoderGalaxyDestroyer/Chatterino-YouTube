@@ -21,6 +21,7 @@
 namespace chatterino {
 
 class YouTubeChannel;
+struct Emote;
 
 class YouTubeProvider final : public QObject
 {
@@ -35,6 +36,7 @@ public:
     static bool isValidInput(const QString &input);
 
     bool isLoggedIn() const;
+    QString accountName() const;
     QString authError() const;
     bool startLogin(QString *error = nullptr);
     void logout();
@@ -54,14 +56,17 @@ public:
 
 private:
     QHash<QString, std::weak_ptr<YouTubeChannel>> channels_;
+    QHash<QString, std::shared_ptr<const Emote>> customEmotes_;
     QTcpServer oauthServer_;
     QString oauthState_;
     QString codeVerifier_;
     QString redirectUri_;
     QString authError_;
+    bool accountNameLookupInProgress_{};
+    quint64 accountNameRequestId_{};
 
-    void processMessageBatch(YouTubeChannel *channel,
-                             const QJsonObject &root);
+    void loadAccountName();
+    void processMessageBatch(YouTubeChannel *channel, const QJsonObject &root);
     void startInnertubeReader(YouTubeChannel *channel);
     void exchangeAuthorizationCode(const QString &code,
                                    const QString &redirectUri);

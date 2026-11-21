@@ -572,6 +572,40 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
         return "";
     }
 
+    if (c->isYouTubeChannel() && this->replyTarget_ != nullptr)
+    {
+        QString message = this->ui_.textEdit->toPlainText();
+        if (this->enableInlineReplying_)
+        {
+            const auto replyPrefix = "@" + this->replyTarget_->displayName;
+            if (message.startsWith(replyPrefix))
+            {
+                message.remove(0, replyPrefix.length());
+                if (message.startsWith(' '))
+                {
+                    message.remove(0, 1);
+                }
+            }
+        }
+
+        message = message.replace('\n', ' ');
+        QString sendMessage =
+            getApp()->getCommands()->execCommand(message, c, false);
+        const auto mention = "@" + this->replyTarget_->displayName;
+        if (!sendMessage.isEmpty())
+        {
+            sendMessage.prepend(mention + ' ');
+        }
+        else
+        {
+            sendMessage = mention;
+        }
+
+        c->sendMessage(sendMessage);
+        this->postMessageSend(message, arguments);
+        return "";
+    }
+
     if (!c->isTwitchChannel() || this->replyTarget_ == nullptr)
     {
         // standard message send behavior
