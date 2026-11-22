@@ -64,6 +64,16 @@ qreal highlightEasingFunction(qreal progress)
     return 1.0 + pow((20.0 / 9.0) * (0.5 * progress - 0.5), 3.0);
 }
 
+QString replyPrefixFor(const MessagePtr &target)
+{
+    auto prefix = target->displayName;
+    if (!prefix.startsWith('@'))
+    {
+        prefix.prepend('@');
+    }
+    return prefix;
+}
+
 class BackwardsSearchLineEdit : public QLineEdit
 {
     Q_OBJECT
@@ -575,9 +585,9 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     if (c->isYouTubeChannel() && this->replyTarget_ != nullptr)
     {
         QString message = this->ui_.textEdit->toPlainText();
+        const auto replyPrefix = replyPrefixFor(this->replyTarget_);
         if (this->enableInlineReplying_)
         {
-            const auto replyPrefix = "@" + this->replyTarget_->displayName;
             if (message.startsWith(replyPrefix))
             {
                 message.remove(0, replyPrefix.length());
@@ -591,14 +601,13 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
         message = message.replace('\n', ' ');
         QString sendMessage =
             getApp()->getCommands()->execCommand(message, c, false);
-        const auto mention = "@" + this->replyTarget_->displayName;
         if (!sendMessage.isEmpty())
         {
-            sendMessage.prepend(mention + ' ');
+            sendMessage.prepend(replyPrefix + ' ');
         }
         else
         {
-            sendMessage = mention;
+            sendMessage = replyPrefix;
         }
 
         c->sendMessage(sendMessage);
@@ -634,8 +643,7 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     if (this->enableInlineReplying_)
     {
         // Remove @username prefix that is inserted when doing inline replies
-        message.remove(0, this->replyTarget_->displayName.length() +
-                              1);  // remove "@username"
+        message.remove(0, replyPrefixFor(this->replyTarget_).length());
 
         if (!message.isEmpty() && message.at(0) == ' ')
         {
@@ -1409,7 +1417,7 @@ void SplitInput::editTextChanged()
     QList<QTextEdit::ExtraSelection> selections;
     if (this->enableInlineReplying_ && this->replyTarget_ != nullptr)
     {
-        const auto prefix = "@" + this->replyTarget_->displayName;
+        const auto prefix = replyPrefixFor(this->replyTarget_);
         const auto input = this->ui_.textEdit->toPlainText();
         if (input == prefix || input.startsWith(prefix + ' '))
         {
@@ -1506,7 +1514,7 @@ void SplitInput::editTextChanged()
             // We need to verify that
             // 1. the @username prefix exists and
             // 2. if a character exists after the @username, it is a space
-            QString replyPrefix = "@" + this->replyTarget_->displayName;
+            QString replyPrefix = replyPrefixFor(this->replyTarget_);
             if (!text.startsWith(replyPrefix) ||
                 (text.length() > replyPrefix.length() &&
                  text.at(replyPrefix.length()) != ' '))
@@ -1593,7 +1601,7 @@ void SplitInput::setReply(MessagePtr target)
     if (this->enableInlineReplying_ && oldParent)
     {
         // Remove old reply prefix
-        auto replyPrefix = "@" + oldParent->displayName;
+        auto replyPrefix = replyPrefixFor(oldParent);
         auto plainText = this->ui_.textEdit->toPlainText().trimmed();
         if (plainText.startsWith(replyPrefix))
         {
@@ -1622,7 +1630,7 @@ void SplitInput::setReply(MessagePtr target)
             }
 
             // Only enable reply label if inline replying
-            auto replyPrefix = "@" + this->replyTarget_->displayName;
+            auto replyPrefix = replyPrefixFor(this->replyTarget_);
             this->ui_.textEdit->setIgnoredCompletionPrefix(replyPrefix + ' ');
             auto plainText = this->ui_.textEdit->toPlainText().trimmed();
 
@@ -1651,8 +1659,7 @@ void SplitInput::setReply(MessagePtr target)
             this->ui_.textEdit->setPlainText(replyPrefix + plainText + " ");
             this->ui_.textEdit->moveCursor(QTextCursor::EndOfBlock);
             this->ui_.textEdit->resetCompletion();
-            this->ui_.replyLabel->setText("Replying to @" +
-                                          this->replyTarget_->displayName);
+            this->ui_.replyLabel->setText("Replying to " + replyPrefix);
         }
     }
     else

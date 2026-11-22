@@ -3433,6 +3433,15 @@ void ChannelView::setInputReply(const MessagePtr &message)
         return;
     }
 
+    if (this->underlyingChannel_.get() != nullptr &&
+        this->underlyingChannel_->isYouTubeChannel())
+    {
+        // YouTube uses the shared inline reply composer without Twitch's
+        // reply-thread model.
+        this->split_->setInputReply(message);
+        return;
+    }
+
     if (!message->replyThread)
     {
         // Message did not already have a thread attached, try to find or create one

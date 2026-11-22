@@ -13,6 +13,7 @@
 #include "controllers/emotes/EmoteController.hpp"
 #include "messages/Emote.hpp"
 #include "messages/Image.hpp"
+#include "messages/Link.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageColor.hpp"
@@ -20,6 +21,7 @@
 #include "providers/emoji/Emojis.hpp"
 #include "providers/youtube/YouTubeChannel.hpp"
 #include "providers/youtube/YouTubeInnertubeReader.hpp"
+#include "singletons/Resources.hpp"
 #include "singletons/Settings.hpp"
 
 #include <QColor>
@@ -1835,6 +1837,16 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                     appendYouTubeText(builder, runText, bodyColor);
                 }
             }
+        }
+
+        if (!authorName.isEmpty() && !builder->id.isEmpty())
+        {
+            auto &replyIcon = getResources().buttons.replyDark;
+            builder
+                .emplace<CircularImageElement>(
+                    Image::fromResourcePixmap(replyIcon, 0.15), 2, Qt::gray,
+                    MessageElementFlag::ReplyButton)
+                ->setLink({Link::ReplyToMessage, builder->id});
         }
         channel->addMessage(builder.release(), MessageContext::Original);
     }
