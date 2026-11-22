@@ -1255,26 +1255,31 @@ MessageElement *MessageBuilder::appendOrEmplaceText(
 
 void MessageBuilder::appendTextWithEmojis(QStringView text)
 {
+    this->appendTextWithEmojis(text, this->textColor_);
+}
+
+void MessageBuilder::appendTextWithEmojis(QStringView text, MessageColor color)
+{
     const std::vector<TwitchSpecialOccurrence> noSpecials;
     tokenizeWordsWithEmoji(
         text, noSpecials,
         variant::Overloaded{
-            [this](TokenizedText token) {
+            [this, color](TokenizedText token) {
                 this->appendOrEmplaceText(token.text.toString(),
-                                          this->textColor_);
+                                          color);
             },
             [this](const TokenizedEmoji &token) {
                 this->addEmoji(token.emote);
             },
-            [this](const TokenizedEmote &token) {
+            [this, color](const TokenizedEmote &token) {
                 this->emplace<EmoteElement>(token.emote,
                                             MessageElementFlag::Emote,
-                                            this->textColor_)
+                                            color)
                     ->setTrailingSpace(token.trailingSpace);
             },
-            [this](const TokenizedGif &token) {
+            [this, color](const TokenizedGif &token) {
                 this->appendOrEmplaceText(token.originalText.toString(),
-                                          this->textColor_);
+                                          color);
             },
         });
 }

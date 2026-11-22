@@ -5,6 +5,7 @@
 #include "providers/youtube/YouTubeProvider.hpp"
 
 #include "Application.hpp"
+#include "common/LinkParser.hpp"
 #include "common/enums/MessageContext.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
@@ -196,6 +197,45 @@ QColor colorFromYouTube(const QJsonValue &value)
         return QColor::fromRgba(static_cast<QRgb>(value.toInteger()));
     }
     return {};
+}
+
+void appendYouTubeText(MessageBuilder &builder, QStringView text,
+                       MessageColor color = MessageColor::Text)
+{
+    while (!text.isEmpty())
+    {
+        const auto parsedLink = linkparser::parse(text);
+        if (!parsedLink)
+        {
+            builder.appendTextWithEmojis(text, color);
+            return;
+        }
+
+        const auto prefix = parsedLink->prefix(text);
+        if (!prefix.isEmpty())
+        {
+            builder.appendTextWithEmojis(prefix, color);
+        }
+
+        const auto linkText = parsedLink->link;
+        if (linkText.isEmpty())
+        {
+            builder.appendTextWithEmojis(text, color);
+            return;
+        }
+
+        builder.addLink(*parsedLink, linkText);
+        const auto consumed = prefix.size() + linkText.size();
+        if (consumed < text.size())
+        {
+            if (auto *link = dynamic_cast<LinkElement *>(
+                    builder.message().elements.back().get()))
+            {
+                link->setTrailingSpace(false);
+            }
+        }
+        text = text.mid(consumed);
+    }
 }
 
 void addApiError(YouTubeChannel *channel, const NetworkResult &result)
@@ -1745,16 +1785,20 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         builder.emplace<TextElement>(authorName + ':',
                                      MessageElementFlag::Username,
                                      usernameColor, FontStyle::ChatMediumBold);
+        const MessageColor bodyColor = type == "superChatEvent"
+                                           ? MessageColor(QColor(Qt::black))
+                                           : MessageColor::Text;
         const auto replyTargetName =
             snippet.value("replyTargetName").toString();
         if (!replyTargetName.isEmpty())
         {
-            builder.appendTextWithEmojis("💬 " + replyTargetName + ' ');
+            appendYouTubeText(builder, "💬 " + replyTargetName + ' ',
+                              bodyColor);
         }
         const auto messageRuns = snippet.value("messageRuns").toArray();
         if (messageRuns.isEmpty())
         {
-            builder.appendTextWithEmojis(text);
+            appendYouTubeText(builder, text, bodyColor);
         }
         else
         {
@@ -1762,9 +1806,11 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             {
                 const auto amount =
                     superChatDetails.value("amountDisplayString").toString();
-                builder.appendTextWithEmojis(amount.isEmpty()
-                                                 ? QStringLiteral("[Super Chat] ")
-                                                 : amount + ' ');
+                appendYouTubeText(
+                    builder,
+                    amount.isEmpty() ? QStringLiteral("[Super Chat] ")
+                                     : amount + ' ',
+                    bodyColor);
             }
             for (const auto &runValue : messageRuns)
             {
@@ -1780,13 +1826,13 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                     }
                     else if (!runText.isEmpty())
                     {
-                        builder.appendTextWithEmojis(runText);
+                        appendYouTubeText(builder, runText, bodyColor);
                     }
                     continue;
                 }
                 if (!runText.isEmpty())
                 {
-                    builder.appendTextWithEmojis(runText);
+                    appendYouTubeText(builder, runText, bodyColor);
                 }
             }
         }
