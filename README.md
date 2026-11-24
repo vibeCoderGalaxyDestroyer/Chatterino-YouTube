@@ -12,11 +12,6 @@
   <a href="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/vibeCoderGalaxyDestroyer/Chatterino-YouTube?include_prereleases"></a>
 </p>
 
-<p align="center">
-  <a href="https://silkstack.ai"><img src="docs/resources/weaver.svg" alt="Weaver logo" width="24" height="24"></a>
-  Made with <a href="https://silkstack.ai">Weaver</a>
-</p>
-
 Chatterino-YouTube is a fork of [Chatterino 2](https://github.com/Chatterino/chatterino2), a chat client for [Twitch.tv](https://twitch.tv), with YouTube live chat support.
 The Chatterino 2 wiki can be found [here](https://wiki.chatterino.com).
 Contribution guidelines can be found [here](https://wiki.chatterino.com/Contributing%20for%20Developers).
@@ -117,4 +112,4 @@ Doxygen is used to generate project information daily and is available [here](ht
 
 - [vibeCoderGalaxyDestroyer](https://github.com/vibeCoderGalaxyDestroyer) — project maintainer and YouTube fork.
 - [Chatterino contributors](https://github.com/Chatterino/chatterino2/graphs/contributors) — the upstream chat client.
-- [OpenAI Codex](https://openai.com/codex/) — AI coding assistant credited for this branding update.
+- [Codex](https://github.com/codex) — OpenAI's coding agent, credited for this branding update.
