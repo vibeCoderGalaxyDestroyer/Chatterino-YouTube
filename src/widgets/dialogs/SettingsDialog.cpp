@@ -28,6 +28,7 @@
 #include "widgets/settingspages/PluginsPage.hpp"
 
 #include <QDialogButtonBox>
+#include <QCloseEvent>
 #include <QLineEdit>
 #include <QPointer>
 
@@ -426,6 +427,19 @@ void SettingsDialog::showEvent(QShowEvent *e)
 {
     this->ui_.search->setText("");
     BaseWindow::showEvent(e);
+}
+
+void SettingsDialog::closeEvent(QCloseEvent *event)
+{
+    if (auto *accountsTab = this->tab(SettingsTabId::Accounts))
+    {
+        if (auto *accountsPage =
+                dynamic_cast<AccountsPage *>(accountsTab->pageIfCreated()))
+        {
+            accountsPage->hideYouTubeCredentials();
+        }
+    }
+    BaseWindow::closeEvent(event);
 }
 
 ///// Widget creation helpers

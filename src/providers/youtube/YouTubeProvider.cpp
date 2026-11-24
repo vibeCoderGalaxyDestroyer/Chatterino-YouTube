@@ -7,6 +7,9 @@
 #include "Application.hpp"
 #include "common/LinkParser.hpp"
 #include "common/enums/MessageContext.hpp"
+#include "controllers/filters/lang/expressions/Expression.hpp"
+#include "controllers/highlights/HighlightCheck.hpp"
+#include "controllers/highlights/HighlightController.hpp"
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/QLogging.hpp"
@@ -18,8 +21,12 @@
 #include "messages/MessageBuilder.hpp"
 #include "messages/MessageColor.hpp"
 #include "messages/MessageElement.hpp"
+#include "messages/MessageParseArgs.hpp"
 #include "providers/emoji/Emojis.hpp"
+#include "providers/twitch/TwitchBadge.hpp"
+#include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/youtube/YouTubeChannel.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "providers/youtube/YouTubeInnertubeReader.hpp"
 #include "singletons/Resources.hpp"
 #include "singletons/Settings.hpp"
@@ -45,6 +52,9 @@
 namespace chatterino {
 
 namespace {
+
+constexpr qsizetype YOUTUBE_CUSTOM_EMOTE_CACHE_LIMIT = 512;
+constexpr qsizetype YOUTUBE_REPLY_TARGET_CACHE_LIMIT = 2048;
 
 constexpr auto YOUTUBE_API = "https://www.googleapis.com/youtube/v3/";
 constexpr auto YOUTUBE_SCOPE =
@@ -125,6 +135,52 @@ std::optional<ChannelLookup> parseChannelLookup(const QString &input)
     }
 
     return ChannelLookup{ChannelLookupKind::Name, trimmed};
+}
+
+QUrl livePageUrlForChannel(const QString &input)
+{
+    const auto lookup = parseChannelLookup(input);
+    if (!lookup)
+    {
+        return {};
+    }
+
+    QString path;
+    switch (lookup->kind)
+    {
+        case ChannelLookupKind::Id:
+            path = "/channel/" + lookup->value + "/live";
+            break;
+        case ChannelLookupKind::Handle:
+            path = "/" + lookup->value + "/live";
+            break;
+        case ChannelLookupKind::Username:
+            path = "/user/" + lookup->value + "/live";
+            break;
+        case ChannelLookupKind::Name: {
+            const auto url = QUrl::fromUserInput(input.trimmed());
+            const auto host = url.host().toLower();
+            if (host != "youtube.com" && host != "www.youtube.com" &&
+                host != "m.youtube.com" && !host.endsWith(".youtube.com"))
+            {
+                return {};
+            }
+            const auto segments = url.path().split('/', Qt::SkipEmptyParts);
+            if (segments.size() >= 2 && segments.at(0) == "c")
+            {
+                path = "/c/" + segments.at(1) + "/live";
+            }
+            break;
+        }
+    }
+
+    if (path.isEmpty())
+    {
+        return {};
+    }
+    QUrl result("https://www.youtube.com");
+    result.setPath(path);
+    return result;
 }
 
 QString channelKey(const QString &input)
@@ -968,9 +1024,18 @@ void YouTubeProvider::loadVideo(YouTubeChannel *channel)
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
     if (channelPtr->isChannelLookup())
     {
-        this->ensureApiAccess(channel, [this, channelPtr] {
-            this->loadLiveVideoForChannel(channelPtr.get());
-        });
+        const auto livePageUrl =
+            livePageUrlForChannel(channelPtr->lookupInput());
+        if (!livePageUrl.isEmpty())
+        {
+            this->startLiveStatusMonitoring(channelPtr.get(),
+                                            livePageUrl.toString());
+            return;
+        }
+        // Resolve display names through YouTube's public search page first.
+        // Channel ID, handle, and legacy username inputs go straight to their
+        // public /live page above and never need an account or API key.
+        this->loadLiveVideoForChannel(channelPtr.get());
         return;
     }
 
@@ -1003,7 +1068,7 @@ void YouTubeProvider::startInnertubeReader(YouTubeChannel *channel)
     const auto weakChannel = std::weak_ptr<YouTubeChannel>(channelPtr);
     channel->reader_ = std::make_unique<YouTubeInnertubeReader>(
         channel->videoId_,
-        [weakChannel](YouTubeInnertubeReader::VideoInfo info,
+        [this, weakChannel](YouTubeInnertubeReader::VideoInfo info,
                       bool chatAvailable) {
             auto channel = weakChannel.lock();
             if (!channel)
@@ -1022,6 +1087,29 @@ void YouTubeProvider::startInnertubeReader(YouTubeChannel *channel)
             {
                 channel->thumbnailUrl_ = std::move(info.thumbnailUrl);
             }
+            if (!info.channelId.isEmpty())
+            {
+                channel->channelId_ = info.channelId;
+                const auto statusUrl = livePageUrlForChannel(info.channelId);
+                if (!statusUrl.isEmpty())
+                {
+                    this->startLiveStatusMonitoring(channel.get(),
+                                                    statusUrl.toString());
+                }
+            }
+            if (info.liveStateKnown)
+            {
+                channel->channelStatusKnown_ = true;
+                channel->channelIsLive_ = info.isLive;
+            }
+            if (info.actualStartTime.isValid())
+            {
+                channel->actualStartTime_ = info.actualStartTime;
+            }
+            if (info.concurrentViewers >= 0)
+            {
+                channel->concurrentViewers_ = info.concurrentViewers;
+            }
             channel->chatAvailable_ = chatAvailable;
             channel->displayNameChanged.invoke();
             if (chatAvailable)
@@ -1030,10 +1118,10 @@ void YouTubeProvider::startInnertubeReader(YouTubeChannel *channel)
                     "Connected to YouTube live chat using Innertube.");
             }
         },
-        [this, weakChannel](QJsonObject root) {
+        [this, weakChannel](QJsonObject root, bool initialBatch) {
             if (auto channel = weakChannel.lock())
             {
-                this->processMessageBatch(channel.get(), root);
+                this->processMessageBatch(channel.get(), root, initialBatch);
             }
         },
         [weakChannel](QString error) {
@@ -1056,17 +1144,127 @@ void YouTubeProvider::loadLiveVideoForChannel(YouTubeChannel *channel)
 
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
-    const auto findLiveStream = [this, channelPtr](const QString &channelId) {
-        if (channelId.isEmpty())
-        {
-            channelPtr->addSystemMessage("YouTube channel was not found.");
-            return;
-        }
-        this->searchLiveVideo(channelPtr.get(), channelId);
-    };
-
-    if (lookup->kind == ChannelLookupKind::Name)
+    if (lookup->kind != ChannelLookupKind::Name)
     {
+        channelPtr->addSystemMessage(
+            "Use a YouTube channel ID, @handle, or channel URL to follow live "
+            "status without a channel-name search.");
+        return;
+    }
+
+    QUrl url("https://www.youtube.com/results");
+    QUrlQuery query;
+    query.addQueryItem("search_query", lookup->value);
+    query.addQueryItem("hl", "en");
+    url.setQuery(query);
+    auto request = NetworkRequest(url);
+    std::move(request)
+        .followRedirects(true)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36")
+        .timeout(20000)
+        .caller(this)
+        .onSuccess([this, channelPtr, lookup](const NetworkResult &result) {
+            if (result.status() != 200)
+            {
+                this->loadLiveVideoForChannelWithApi(channelPtr.get());
+                return;
+            }
+
+            const auto candidates =
+                YouTubeInnertubeReader::parseChannelSearchPage(
+                    result.getData());
+            const auto requestedName = lookup->value.trimmed();
+            auto handleName = requestedName;
+            if (handleName.startsWith('@'))
+            {
+                handleName.remove(0, 1);
+            }
+
+            QList<YouTubeInnertubeReader::ChannelSearchResult> handleMatches;
+            QList<YouTubeInnertubeReader::ChannelSearchResult> titleMatches;
+            for (const auto &candidate : candidates)
+            {
+                if (candidate.channelId.isEmpty())
+                {
+                    continue;
+                }
+                const auto path = QUrl(candidate.url).path();
+                const auto candidateHandle =
+                    path.startsWith("/@") ? path.mid(2).section('/', 0, 0)
+                                            : QString();
+                if (!candidateHandle.isEmpty() &&
+                    candidateHandle.compare(handleName,
+                                            Qt::CaseInsensitive) == 0)
+                {
+                    handleMatches.append(candidate);
+                }
+                if (candidate.title.compare(requestedName,
+                                            Qt::CaseInsensitive) == 0)
+                {
+                    titleMatches.append(candidate);
+                }
+            }
+
+            const auto &matches =
+                handleMatches.isEmpty() ? titleMatches : handleMatches;
+            if (matches.size() > 1)
+            {
+                channelPtr->addSystemMessage(
+                    "Several YouTube channels match this name. Use the "
+                    "channel's @handle or URL.");
+                return;
+            }
+            if (matches.isEmpty())
+            {
+                this->loadLiveVideoForChannelWithApi(channelPtr.get());
+                return;
+            }
+            const auto &match = matches.first();
+            channelPtr->channelId_ = match.channelId;
+            if (!match.title.isEmpty())
+            {
+                channelPtr->channelTitle_ = match.title;
+            }
+            const auto liveUrl = livePageUrlForChannel(match.channelId);
+            this->startLiveStatusMonitoring(channelPtr.get(),
+                                            liveUrl.toString());
+            channelPtr->displayNameChanged.invoke();
+        })
+        .onError([this, channelPtr](const NetworkResult &result) {
+            logYouTubeDiagnostic(
+                "channel_name_public_search_failed",
+                QString("input=%1 error=%2")
+                    .arg(channelPtr->lookupInput(), result.formatError()));
+            this->loadLiveVideoForChannelWithApi(channelPtr.get());
+        })
+        .execute();
+}
+
+void YouTubeProvider::loadLiveVideoForChannelWithApi(YouTubeChannel *channel)
+{
+    auto channelPtr =
+        std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
+    if (!this->isLoggedIn() &&
+        getSettings()->youtubeApiKey.getValue().isEmpty())
+    {
+        channelPtr->addSystemMessage(
+            "Could not resolve that channel name from YouTube's public search. "
+            "Try its @handle or channel URL. An API key or sign-in also "
+            "enables the official channel-name search fallback.");
+        return;
+    }
+
+    const auto lookup = parseChannelLookup(channelPtr->lookupInput());
+    if (!lookup || lookup->kind != ChannelLookupKind::Name)
+    {
+        return;
+    }
+
+    this->ensureApiAccess(channelPtr.get(), [this, channelPtr, lookup] {
         QUrlQuery query;
         query.addQueryItem("part", "snippet");
         query.addQueryItem("type", "channel");
@@ -1075,8 +1273,7 @@ void YouTubeProvider::loadLiveVideoForChannel(YouTubeChannel *channel)
         auto request = makeApiRequest("search", query);
         std::move(request)
             .caller(this)
-            .onSuccess([channelPtr, findLiveStream,
-                        lookup](const NetworkResult &result) {
+            .onSuccess([this, channelPtr, lookup](const NetworkResult &result) {
                 const auto items = result.parseJson().value("items").toArray();
                 QString matchedChannelId;
                 int exactMatchCount = 0;
@@ -1089,11 +1286,8 @@ void YouTubeProvider::loadLiveVideoForChannel(YouTubeChannel *channel)
                                         .toObject()
                                         .value("channelId")
                                         .toString();
-                    if (id.isEmpty())
-                    {
-                        continue;
-                    }
-                    if (title.compare(lookup->value, Qt::CaseInsensitive) == 0)
+                    if (!id.isEmpty() &&
+                        title.compare(lookup->value, Qt::CaseInsensitive) == 0)
                     {
                         matchedChannelId = id;
                         ++exactMatchCount;
@@ -1114,92 +1308,227 @@ void YouTubeProvider::loadLiveVideoForChannel(YouTubeChannel *channel)
                         "@handle or channel URL.");
                     return;
                 }
-                findLiveStream(matchedChannelId);
+                channelPtr->channelId_ = matchedChannelId;
+                const auto liveUrl = livePageUrlForChannel(matchedChannelId);
+                this->startLiveStatusMonitoring(channelPtr.get(),
+                                                liveUrl.toString());
             })
             .onError([channelPtr](const NetworkResult &result) {
                 addApiError(channelPtr.get(), result);
             })
             .execute();
+    });
+}
+
+void YouTubeProvider::startLiveStatusMonitoring(
+    YouTubeChannel *channel, const QString &liveStatusUrl)
+{
+    if (channel->liveStatusUrl_ == liveStatusUrl &&
+        channel->liveStatusTimer_.isActive())
+    {
         return;
     }
 
-    QUrlQuery query;
-    query.addQueryItem("part", "id");
-    switch (lookup->kind)
-    {
-        case ChannelLookupKind::Id:
-            query.addQueryItem("id", lookup->value);
-            break;
-        case ChannelLookupKind::Handle:
-            query.addQueryItem("forHandle", lookup->value);
-            break;
-        case ChannelLookupKind::Username:
-            query.addQueryItem("forUsername", lookup->value);
-            break;
-        case ChannelLookupKind::Name:
-            break;
-    }
-    auto request = makeApiRequest("channels", query);
-    std::move(request)
-        .caller(this)
-        .onSuccess([channelPtr, findLiveStream](const NetworkResult &result) {
-            const auto items = result.parseJson().value("items").toArray();
-            if (items.isEmpty())
-            {
-                channelPtr->addSystemMessage("YouTube channel was not found.");
-                return;
-            }
-            const auto channelId =
-                items.at(0).toObject().value("id").toString();
-            findLiveStream(channelId);
-        })
-        .onError([channelPtr](const NetworkResult &result) {
-            addApiError(channelPtr.get(), result);
-        })
-        .execute();
+    channel->liveStatusUrl_ = liveStatusUrl;
+    channel->liveStatusTimer_.setInterval(5 * 60 * 1000);
+    channel->liveStatusTimer_.start();
+    logYouTubeDiagnostic(
+        "channel_status_monitor_start",
+        QString("input=%1 interval_ms=%2")
+            .arg(channel->lookupInput())
+            .arg(channel->liveStatusTimer_.interval()));
+    this->checkLiveStatus(channel);
 }
 
-void YouTubeProvider::searchLiveVideo(YouTubeChannel *channel,
-                                      const QString &channelId)
+void YouTubeProvider::checkLiveStatus(YouTubeChannel *channel)
 {
-    QUrlQuery query;
-    query.addQueryItem("part", "snippet");
-    query.addQueryItem("channelId", channelId);
-    query.addQueryItem("eventType", "live");
-    query.addQueryItem("type", "video");
-    query.addQueryItem("order", "date");
-    query.addQueryItem("maxResults", "1");
+    if (channel->liveStatusUrl_.isEmpty() ||
+        channel->statusRequestInFlight_)
+    {
+        return;
+    }
+
+    channel->statusRequestInFlight_ = true;
+    const auto requestId = ++channel->liveStatusRequestId_;
     auto channelPtr =
         std::dynamic_pointer_cast<YouTubeChannel>(channel->shared_from_this());
-    auto request = makeApiRequest("search", query);
+    const auto weakChannel = std::weak_ptr<YouTubeChannel>(channelPtr);
+    QUrl url(channel->liveStatusUrl_);
+    auto request = NetworkRequest(url);
     std::move(request)
+        .followRedirects(true)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36")
+        .timeout(20000)
         .caller(this)
-        .onSuccess([this, channelPtr](const NetworkResult &result) {
-            const auto items = result.parseJson().value("items").toArray();
-            if (items.isEmpty())
+        .onSuccess([this, weakChannel, requestId](const NetworkResult &result) {
+            auto channel = weakChannel.lock();
+            if (!channel || channel->liveStatusRequestId_ != requestId)
             {
-                channelPtr->addSystemMessage("No active YouTube live stream "
-                                             "was found for this channel.");
                 return;
             }
-            const auto videoId = items.at(0)
-                                     .toObject()
-                                     .value("id")
-                                     .toObject()
-                                     .value("videoId")
-                                     .toString();
-            if (videoId.isEmpty())
+            channel->statusRequestInFlight_ = false;
+            if (result.status() != 200)
             {
-                channelPtr->addSystemMessage("YouTube did not return an active "
-                                             "live video for this channel.");
+                logYouTubeDiagnostic(
+                    "channel_status_http_error",
+                    QString("input=%1 status=%2")
+                        .arg(channel->lookupInput())
+                        .arg(result.status().value_or(-1)));
                 return;
             }
-            channelPtr->videoId_ = videoId;
-            this->startInnertubeReader(channelPtr.get());
-            this->loadVideoDetails(channelPtr.get());
+
+            const auto info =
+                YouTubeInnertubeReader::parseWatchPage(result.getData());
+            if (!info.pageParsed || !info.liveStateKnown)
+            {
+                logYouTubeDiagnostic(
+                    "channel_status_unknown",
+                    QString("input=%1 parsed=%2 live_state=%3 bytes=%4")
+                        .arg(channel->lookupInput())
+                        .arg(info.pageParsed)
+                        .arg(info.liveStateKnown)
+                        .arg(result.getData().size()));
+                return;
+            }
+
+            const bool wasKnown = channel->channelStatusKnown_;
+            const bool wasLive = channel->channelIsLive_;
+            const bool isLive = info.isLive && !info.videoId.isEmpty();
+            const bool isNewStream =
+                isLive && (channel->videoId_ != info.videoId || !wasLive);
+            bool metadataChanged = !wasKnown;
+
+            channel->channelStatusKnown_ = true;
+            channel->channelIsLive_ = isLive;
+            if (!info.channelId.isEmpty())
+            {
+                channel->channelId_ = info.channelId;
+            }
+            if (!info.channelTitle.isEmpty() &&
+                channel->channelTitle_ != info.channelTitle)
+            {
+                channel->channelTitle_ = info.channelTitle;
+                metadataChanged = true;
+            }
+
+            if (isLive)
+            {
+                if (!info.title.isEmpty() &&
+                    channel->videoTitle_ != info.title)
+                {
+                    channel->videoTitle_ = info.title;
+                    metadataChanged = true;
+                }
+                if (!info.thumbnailUrl.isEmpty() &&
+                    channel->thumbnailUrl_ != info.thumbnailUrl)
+                {
+                    channel->thumbnailUrl_ = info.thumbnailUrl;
+                    metadataChanged = true;
+                }
+                if (info.actualStartTime.isValid() &&
+                    channel->actualStartTime_ != info.actualStartTime)
+                {
+                    channel->actualStartTime_ = info.actualStartTime;
+                    metadataChanged = true;
+                }
+                if (info.concurrentViewers >= 0 &&
+                    channel->concurrentViewers_ != info.concurrentViewers)
+                {
+                    channel->concurrentViewers_ = info.concurrentViewers;
+                    metadataChanged = true;
+                }
+
+                if (isNewStream)
+                {
+                    channel->videoId_ = info.videoId;
+                    channel->liveChatId_.clear();
+                    channel->chatAvailable_ = false;
+                    if (channel->reader_)
+                    {
+                        auto reader = std::move(channel->reader_);
+                        reader->stop();
+                    }
+                    this->startInnertubeReader(channel.get());
+                    const auto title = channel->videoTitle_.isEmpty()
+                                           ? QString("YouTube channel is live")
+                                           : QString("Now live: %1")
+                                                 .arg(channel->videoTitle_);
+                    channel->addSystemMessage(title);
+                    channel->offlineNoticeSent_ = false;
+                    if (this->isLoggedIn())
+                    {
+                        const auto weakChannel =
+                            std::weak_ptr<YouTubeChannel>(channel);
+                        this->ensureApiAccess(channel.get(), [this, weakChannel] {
+                            if (auto liveChannel = weakChannel.lock();
+                                liveChannel && liveChannel->channelIsLive_)
+                            {
+                                this->loadVideoDetails(liveChannel.get());
+                            }
+                        });
+                    }
+                }
+            }
+            else
+            {
+                if (wasLive)
+                {
+                    if (channel->reader_)
+                    {
+                        auto reader = std::move(channel->reader_);
+                        reader->stop();
+                    }
+                    channel->liveChatId_.clear();
+                    channel->chatAvailable_ = false;
+                    channel->videoTitle_.clear();
+                    channel->thumbnailUrl_.clear();
+                    channel->actualStartTime_ = {};
+                    channel->concurrentViewers_ = -1;
+                    if (channel->channelLookup_)
+                    {
+                        channel->videoId_.clear();
+                    }
+                    channel->addSystemMessage(
+                        "The YouTube stream ended. Waiting for the next live "
+                        "stream.");
+                    channel->offlineNoticeSent_ = true;
+                    metadataChanged = true;
+                }
+                else if (!channel->offlineNoticeSent_)
+                {
+                    channel->addSystemMessage(
+                        "YouTube channel is offline. Checking every 5 minutes.");
+                    channel->offlineNoticeSent_ = true;
+                }
+            }
+
+            if (metadataChanged || isNewStream || wasLive != isLive)
+            {
+                channel->displayNameChanged.invoke();
+            }
+            logYouTubeDiagnostic(
+                "channel_status_result",
+                QString("input=%1 state=%2 video_id=%3 viewers=%4")
+                    .arg(channel->lookupInput(),
+                         isLive ? QStringLiteral("live")
+                                : QStringLiteral("offline"),
+                         isLive ? channel->videoId_ : QString())
+                    .arg(channel->concurrentViewers_));
         })
-        .onError([channelPtr](const NetworkResult &result) {
-            addApiError(channelPtr.get(), result);
+        .onError([weakChannel, requestId](const NetworkResult &result) {
+            if (auto channel = weakChannel.lock();
+                channel && channel->liveStatusRequestId_ == requestId)
+            {
+                channel->statusRequestInFlight_ = false;
+                logYouTubeDiagnostic(
+                    "channel_status_request_failed",
+                    QString("input=%1 error=%2")
+                        .arg(channel->lookupInput(), result.formatError()));
+            }
         })
         .execute();
 }
@@ -1276,10 +1605,23 @@ void YouTubeProvider::loadVideoDetails(YouTubeChannel *channel)
 }
 
 void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
-                                          const QJsonObject &root)
+                                          const QJsonObject &root,
+                                          bool initialBatch)
 {
-    const auto items = root.value("items").toArray();
-    auto getCustomEmoji = [this](const QJsonObject &run) -> EmotePtr {
+    const auto events = root.value("events").toArray();
+    auto cacheCustomEmote = [this](const QString &key,
+                                   const std::shared_ptr<const Emote> &emote) {
+        this->customEmotes_.insert(key, emote);
+        this->customEmoteCacheOrder_.enqueue(key);
+        while (this->customEmoteCacheOrder_.size() >
+               YOUTUBE_CUSTOM_EMOTE_CACHE_LIMIT)
+        {
+            this->customEmotes_.remove(
+                this->customEmoteCacheOrder_.dequeue());
+        }
+    };
+    auto getCustomEmoji = [this, &cacheCustomEmote](
+                              const QJsonObject &run) -> EmotePtr {
         struct Thumbnail {
             QString url;
             QSize size;
@@ -1288,8 +1630,17 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         const auto emojiId = run.value("emojiId").toString();
         const auto fallbackName = run.value("text").toString();
         const auto label = run.value("label").toString();
+        const bool isGift = run.value("isGift").toBool();
         std::vector<Thumbnail> thumbnails;
-        for (const auto &thumbnailValue : run.value("thumbnails").toArray())
+        auto thumbnailValues = run.value("thumbnails").toArray();
+        const auto giftUrl = run.value("giftUrl").toString();
+        if (thumbnailValues.isEmpty() && !giftUrl.isEmpty())
+        {
+            thumbnailValues.append(QJsonObject{{"url", giftUrl},
+                                               {"width", 128},
+                                               {"height", 128}});
+        }
+        for (const auto &thumbnailValue : thumbnailValues)
         {
             const auto thumbnail = thumbnailValue.toObject();
             auto url = thumbnail.value("url").toString();
@@ -1303,7 +1654,10 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             const bool youtubeImageHost =
                 host == "ggpht.com" || host.endsWith(".ggpht.com") ||
                 host == "googleusercontent.com" ||
-                host.endsWith(".googleusercontent.com");
+                host.endsWith(".googleusercontent.com") ||
+                host == "gstatic.com" || host.endsWith(".gstatic.com") ||
+                host == "ytimg.com" || host.endsWith(".ytimg.com") ||
+                host == "youtube.com" || host.endsWith(".youtube.com");
             if (parsedUrl.scheme() != "https" || !youtubeImageHost)
             {
                 continue;
@@ -1329,7 +1683,9 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                              b.size.width() * b.size.height();
                   });
 
-        const auto cacheKey = emojiId + "|" + thumbnails.back().url;
+        const auto cacheKey =
+            QString(isGift ? "youtube-gift|" : "youtube-emoji|") + emojiId +
+            "|" + thumbnails.back().url;
         if (const auto cached = this->customEmotes_.constFind(cacheKey);
             cached != this->customEmotes_.cend())
         {
@@ -1375,139 +1731,213 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         auto emote = std::make_shared<Emote>(Emote{
             .name = EmoteName{emoteName},
             .images = ImageSet{image1, image2, image3},
-            .tooltip = Tooltip{QString("YouTube member emote<br>%1")
-                                   .arg(tooltipText.toHtmlEscaped())},
+            .tooltip = Tooltip{
+                QString(isGift ? "YouTube gift<br>%1" : "YouTube emote<br>%1")
+                    .arg(tooltipText.toHtmlEscaped())},
             .homePage = Url{"https://www.youtube.com/"},
             .zeroWidth = false,
             .id = EmoteId{emojiId.isEmpty() ? cacheKey : emojiId},
             .author = {},
         });
-        this->customEmotes_.insert(cacheKey, emote);
+        cacheCustomEmote(cacheKey, emote);
         return emote;
     };
-    auto getMembershipBadge = [this](const QJsonArray &badges) -> EmotePtr {
+    auto getYouTubeBadge = [this, &cacheCustomEmote](
+                               const QJsonObject &badge) -> EmotePtr {
         struct Thumbnail {
             QString url;
             QSize size;
         };
 
-        for (const auto &badgeValue : badges)
+        std::vector<Thumbnail> thumbnails;
+        for (const auto &thumbnailValue : badge.value("thumbnails").toArray())
         {
-            const auto badge = badgeValue.toObject();
-            if (!badge.value("isMember").toBool())
+            const auto thumbnail = thumbnailValue.toObject();
+            auto url = thumbnail.value("url").toString();
+            if (url.startsWith("//"))
+            {
+                url.prepend("https:");
+            }
+            const QUrl parsedUrl(url);
+            const auto host = parsedUrl.host().toLower();
+            const bool youtubeImageHost =
+                host == "ggpht.com" || host.endsWith(".ggpht.com") ||
+                host == "googleusercontent.com" ||
+                host.endsWith(".googleusercontent.com");
+            if (parsedUrl.scheme() != "https" || !youtubeImageHost)
             {
                 continue;
             }
 
-            std::vector<Thumbnail> thumbnails;
-            for (const auto &thumbnailValue :
-                 badge.value("thumbnails").toArray())
+            auto width = thumbnail.value("width").toInt();
+            auto height = thumbnail.value("height").toInt();
+            if (width <= 0 || height <= 0)
             {
-                const auto thumbnail = thumbnailValue.toObject();
-                auto url = thumbnail.value("url").toString();
-                if (url.startsWith("//"))
-                {
-                    url.prepend("https:");
-                }
-                const QUrl parsedUrl(url);
-                const auto host = parsedUrl.host().toLower();
-                const bool youtubeImageHost =
-                    host == "ggpht.com" || host.endsWith(".ggpht.com") ||
-                    host == "googleusercontent.com" ||
-                    host.endsWith(".googleusercontent.com");
-                if (parsedUrl.scheme() != "https" || !youtubeImageHost)
-                {
-                    continue;
-                }
-
-                auto width = thumbnail.value("width").toInt();
-                auto height = thumbnail.value("height").toInt();
-                if (width <= 0 || height <= 0)
-                {
-                    width = 48;
-                    height = 48;
-                }
-                thumbnails.push_back({std::move(url), QSize(width, height)});
+                width = 48;
+                height = 48;
             }
-            if (thumbnails.empty())
-            {
-                continue;
-            }
+            thumbnails.push_back({std::move(url), QSize(width, height)});
+        }
+        if (thumbnails.empty())
+        {
+            return {};
+        }
 
-            std::sort(thumbnails.begin(), thumbnails.end(),
-                      [](const auto &a, const auto &b) {
-                          return a.size.width() * a.size.height() <
-                                 b.size.width() * b.size.height();
-                      });
-            const auto cacheKey = "member-badge|" + thumbnails.back().url;
-            if (const auto cached = this->customEmotes_.constFind(cacheKey);
-                cached != this->customEmotes_.cend())
-            {
-                return cached.value();
-            }
+        std::sort(thumbnails.begin(), thumbnails.end(),
+                  [](const auto &a, const auto &b) {
+                      return a.size.width() * a.size.height() <
+                             b.size.width() * b.size.height();
+                  });
+        auto tooltip = badge.value("tooltip").toString().trimmed();
+        if (tooltip.isEmpty())
+        {
+            tooltip = "YouTube chat badge";
+        }
+        const auto cacheKey = "youtube-badge|" + tooltip + "|" +
+                              thumbnails.back().url;
+        if (const auto cached = this->customEmotes_.constFind(cacheKey);
+            cached != this->customEmotes_.cend())
+        {
+            return cached.value();
+        }
 
-            std::vector<Thumbnail> selectedThumbnails;
-            if (thumbnails.size() <= 3)
+        std::vector<Thumbnail> selectedThumbnails;
+        if (thumbnails.size() <= 3)
+        {
+            selectedThumbnails = std::move(thumbnails);
+        }
+        else
+        {
+            selectedThumbnails = {thumbnails.front(),
+                                  thumbnails[thumbnails.size() / 2],
+                                  thumbnails.back()};
+        }
+
+        auto makeImage = [](const Thumbnail &thumbnail) {
+            const auto largestDimension =
+                std::max(thumbnail.size.width(), thumbnail.size.height());
+            const qreal scale = 18.0 / largestDimension;
+            return Image::fromUrl({thumbnail.url}, scale, thumbnail.size);
+        };
+        auto image1 = Image::getEmpty();
+        auto image2 = Image::getEmpty();
+        auto image3 = Image::getEmpty();
+        if (!selectedThumbnails.empty())
+        {
+            image1 = makeImage(selectedThumbnails[0]);
+        }
+        if (selectedThumbnails.size() >= 2)
+        {
+            image2 = makeImage(selectedThumbnails[1]);
+        }
+        if (selectedThumbnails.size() >= 3)
+        {
+            image3 = makeImage(selectedThumbnails[2]);
+        }
+
+        auto emote = std::make_shared<Emote>(Emote{
+            .name = EmoteName{tooltip},
+            .images = ImageSet{image1, image2, image3},
+            .tooltip = Tooltip{tooltip.toHtmlEscaped()},
+            .homePage = Url{"https://www.youtube.com/"},
+            .zeroWidth = false,
+            .id = EmoteId{cacheKey},
+            .author = {},
+        });
+        cacheCustomEmote(cacheKey, emote);
+        return emote;
+    };
+
+    for (const auto &eventValue : events)
+    {
+        const auto event = eventValue.toObject();
+        const auto action = event.value("action").toString();
+        const auto targetItemId = event.value("targetItemId").toString();
+        if (action == "delete")
+        {
+            const auto deleted = channel->findMessageByID(targetItemId);
+            if (deleted)
             {
-                selectedThumbnails = std::move(thumbnails);
+                deleted->flags.set(MessageFlag::Disabled);
+                deleted->flags.set(MessageFlag::InvalidReplyTarget);
+            }
+            const auto cachedTarget =
+                channel->replyTargets_.value(targetItemId);
+            if (cachedTarget.messageId.isEmpty())
+            {
+                channel->replyTargets_.remove(targetItemId);
             }
             else
             {
-                selectedThumbnails = {thumbnails.front(),
-                                      thumbnails[thumbnails.size() / 2],
-                                      thumbnails.back()};
+                for (auto it = channel->replyTargets_.begin();
+                     it != channel->replyTargets_.end();)
+                {
+                    if (it.key() == targetItemId ||
+                        it->messageId == cachedTarget.messageId)
+                    {
+                        it = channel->replyTargets_.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
             }
-
-            auto makeImage = [](const Thumbnail &thumbnail) {
-                const auto largestDimension =
-                    std::max(thumbnail.size.width(), thumbnail.size.height());
-                const qreal scale = 18.0 / largestDimension;
-                return Image::fromUrl({thumbnail.url}, scale, thumbnail.size);
-            };
-            auto image1 = Image::getEmpty();
-            auto image2 = Image::getEmpty();
-            auto image3 = Image::getEmpty();
-            if (!selectedThumbnails.empty())
-            {
-                image1 = makeImage(selectedThumbnails[0]);
-            }
-            if (selectedThumbnails.size() >= 2)
-            {
-                image2 = makeImage(selectedThumbnails[1]);
-            }
-            if (selectedThumbnails.size() >= 3)
-            {
-                image3 = makeImage(selectedThumbnails[2]);
-            }
-
-            auto tooltip = badge.value("tooltip").toString().trimmed();
-            if (tooltip.isEmpty())
-            {
-                tooltip = "YouTube channel membership badge";
-            }
-            auto emote = std::make_shared<Emote>(Emote{
-                .name = EmoteName{"YouTube member badge"},
-                .images = ImageSet{image1, image2, image3},
-                .tooltip = Tooltip{tooltip.toHtmlEscaped()},
-                .homePage = Url{"https://www.youtube.com/"},
-                .zeroWidth = false,
-                .id = EmoteId{cacheKey},
-                .author = {},
-            });
-            this->customEmotes_.insert(cacheKey, emote);
-            return emote;
+            continue;
         }
-        return {};
-    };
+        if (action == "deleteByAuthor")
+        {
+            const auto authorChannelId =
+                event.value("authorChannelId").toString();
+            if (authorChannelId.isEmpty())
+            {
+                continue;
+            }
+            for (const auto &message : channel->getMessageSnapshot())
+            {
+                if (message->userID == authorChannelId)
+                {
+                    message->flags.set(MessageFlag::Disabled);
+                    message->flags.set(MessageFlag::InvalidReplyTarget);
+                }
+            }
+            for (auto it = channel->replyTargets_.begin();
+                 it != channel->replyTargets_.end();)
+            {
+                if (it->authorId == authorChannelId)
+                {
+                    it = channel->replyTargets_.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            continue;
+        }
+        if (action == "clear")
+        {
+            channel->disableAllMessages();
+            continue;
+        }
 
-    for (const auto &itemValue : items)
-    {
-        const auto item = itemValue.toObject();
+        const auto item = event.value("item").toObject();
+        if (item.isEmpty())
+        {
+            continue;
+        }
         const auto snippet = item.value("snippet").toObject();
         const auto author = item.value("authorDetails").toObject();
         const auto type = snippet.value("type").toString();
+        if (initialBatch && type == "giftEvent")
+        {
+            // Initial chat data includes recent history. Do not replay old
+            // gift animations when a YouTube chat is first opened.
+            continue;
+        }
         const auto superChatDetails =
             snippet.value("superChatDetails").toObject();
+        const auto giftDetails = snippet.value("giftDetails").toObject();
         QString text = snippet.value("displayMessage").toString();
         if (type == "textMessageEvent")
         {
@@ -1515,6 +1945,31 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                        .toObject()
                        .value("messageText")
                        .toString();
+        }
+        if (type == "giftEvent")
+        {
+            const auto giftName = giftDetails.value("giftName").toString();
+            static const QRegularExpression genericGiftText(
+                R"(^\s*sent\s+(?:a\s+)?gift\s*$)",
+                QRegularExpression::CaseInsensitiveOption);
+            const auto namedGiftText = "sent " + giftName;
+            if (text.isEmpty() || genericGiftText.match(text).hasMatch() ||
+                (!giftName.isEmpty() &&
+                 text.trimmed().compare(namedGiftText,
+                                        Qt::CaseInsensitive) == 0))
+            {
+                text = "sent a gift";
+            }
+            if (!giftName.isEmpty())
+            {
+                const auto giftSuffix =
+                    QStringLiteral(" (") + giftName + QStringLiteral(")");
+                if (!text.trimmed().endsWith(giftSuffix,
+                                             Qt::CaseInsensitive))
+                {
+                    text = text.trimmed() + giftSuffix;
+                }
+            }
         }
         if (type == "superChatEvent")
         {
@@ -1592,6 +2047,10 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                 text += " — " + options.join(", ");
             }
         }
+        else if (type == "chatEndedEvent")
+        {
+            text = "YouTube live chat ended.";
+        }
         if (text.isEmpty())
         {
             continue;
@@ -1601,7 +2060,14 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
         auto authorName = author.value("displayName").toString().trimmed();
         if (authorName.isEmpty())
         {
-            authorName = authorId.isEmpty() ? "YouTube user" : authorId;
+            authorName = type == "chatEndedEvent" ||
+                                 type == "chatModeChangeEvent" ||
+                                 type == "sponsorOnlyModeStartedEvent" ||
+                                 type == "sponsorOnlyModeEndedEvent" ||
+                                 type == "viewerEngagementMessageEvent" ||
+                                 type == "tombstone" || type == "raidEvent"
+                             ? "YouTube"
+                             : (authorId.isEmpty() ? "YouTube user" : authorId);
         }
         while (authorName.startsWith('@'))
         {
@@ -1637,16 +2103,50 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
 
         MessageBuilder builder;
         builder->id = item.value("id").toString();
+        if (type == "pollEvent")
+        {
+            builder->id = "youtube-active-poll";
+        }
+        else if (action == "banner" && !targetItemId.isEmpty())
+        {
+            builder->id = type == "raidEvent"
+                              ? QStringLiteral("youtube-raid-") + targetItemId
+                              : targetItemId;
+        }
+        else if (type == "chatEndedEvent")
+        {
+            builder->id = "youtube-chat-ended";
+        }
+        else if (action == "replace" && !targetItemId.isEmpty())
+        {
+            builder->id = targetItemId;
+        }
         builder->messageText = text;
         builder->searchText = authorName + " " + text;
         builder->loginName = authorName;
         builder->displayName = authorName;
         builder->userID = authorId;
         builder->channelName = channel->getName();
-        if (type == "superChatEvent")
+        if (type == "chatEndedEvent" || type == "chatModeChangeEvent" ||
+            type == "sponsorOnlyModeStartedEvent" ||
+            type == "sponsorOnlyModeEndedEvent" ||
+            type == "viewerEngagementMessageEvent" || type == "tombstone")
         {
+            builder->flags.set(MessageFlag::System);
+        }
+        if (type == "superChatEvent" || type == "superStickerEvent")
+        {
+            const auto stickerDetails =
+                snippet.value("superStickerDetails")
+                    .toObject()
+                    .value("superStickerMetadata")
+                    .toObject();
             auto backgroundColor =
-                colorFromYouTube(superChatDetails.value("bodyBackgroundColor"));
+                type == "superChatEvent"
+                    ? colorFromYouTube(
+                          superChatDetails.value("bodyBackgroundColor"))
+                    : colorFromYouTube(
+                          stickerDetails.value("backgroundColor"));
             if (!backgroundColor.isValid() || backgroundColor.alpha() == 0)
             {
                 backgroundColor = QColor("#00E5FF");
@@ -1654,14 +2154,22 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             builder->flags.set(MessageFlag::Highlighted);
             builder->highlightColor = std::make_shared<QColor>(backgroundColor);
         }
-        else if (type == "newSponsorEvent" ||
+        else if (type == "giftEvent" || type == "newSponsorEvent" ||
                  type == "membershipGiftingEvent" ||
-                 type == "giftMembershipReceivedEvent")
+                 type == "giftMembershipReceivedEvent" ||
+                 type == "memberMilestoneChatEvent")
         {
-            // YouTube highlights membership welcome and gift announcements.
+            // YouTube highlights membership and gift announcements.
             builder->flags.set(MessageFlag::Highlighted);
             builder->highlightColor =
                 std::make_shared<QColor>(QColor("#13A567"));
+        }
+        else if (type == "raidEvent")
+        {
+            builder->flags.set(MessageFlag::System);
+            builder->flags.set(MessageFlag::Highlighted);
+            builder->highlightColor =
+                std::make_shared<QColor>(QColor("#7446B8"));
         }
         auto publishedAt = QDateTime::fromString(
             snippet.value("publishedAt").toString(), Qt::ISODate);
@@ -1670,6 +2178,288 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             publishedAt = QDateTime::currentDateTime();
         }
         builder->timestamp = publishedAt;
+
+        if (type == "superChatEvent")
+        {
+            YouTubeChannel::ReplyTarget target;
+            target.messageId = item.value("id").toString();
+            if (target.messageId.isEmpty())
+            {
+                target.messageId = builder->id;
+            }
+            target.authorId = authorId;
+            target.authorName = authorName;
+            target.messageText = builder->messageText;
+            target.timestamp = publishedAt;
+
+            if (!target.messageId.isEmpty())
+            {
+                channel->replyTargets_.insert(target.messageId, target);
+            }
+            if (!builder->id.isEmpty())
+            {
+                channel->replyTargets_.insert(builder->id, target);
+            }
+            if (!targetItemId.isEmpty())
+            {
+                channel->replyTargets_.insert(targetItemId, target);
+            }
+
+            // Keep recent Super Chat reply context without retaining every
+            // paid message for the lifetime of the channel.
+            while (channel->replyTargets_.size() >
+                   YOUTUBE_REPLY_TARGET_CACHE_LIMIT)
+            {
+                auto oldest = channel->replyTargets_.begin();
+                for (auto it = channel->replyTargets_.begin();
+                     it != channel->replyTargets_.end(); ++it)
+                {
+                    if (it->timestamp < oldest->timestamp)
+                    {
+                        oldest = it;
+                    }
+                }
+                channel->replyTargets_.erase(oldest);
+            }
+        }
+
+        const auto replyTargetId =
+            snippet.value("replyTargetId").toString();
+        auto replyParent =
+            replyTargetId.isEmpty()
+                ? MessagePtr{}
+                : channel->findMessageByID(replyTargetId);
+        auto replyTargetName = snippet.value("replyTargetName").toString();
+        auto replyTargetMessage =
+            snippet.value("replyTargetMessage").toString();
+        const auto replyTargetAmount =
+            snippet.value("replyTargetAmount").toString().trimmed();
+        const auto replyTargetUserId =
+            snippet.value("replyTargetUserId").toString();
+        auto replyTargetIsSuperChat =
+            snippet.value("replyTargetIsSuperChat").toBool();
+        if (!replyParent && !replyTargetId.isEmpty())
+        {
+            const auto cachedTarget =
+                channel->replyTargets_.constFind(replyTargetId);
+            if (cachedTarget != channel->replyTargets_.cend())
+            {
+                replyTargetName = cachedTarget->authorName;
+                replyTargetMessage = cachedTarget->messageText;
+                replyTargetIsSuperChat = true;
+            }
+        }
+        static const QRegularExpression timestampOnlyPattern(
+            R"(^\d{1,2}:\d{2}(?::\d{2})?$)");
+        const auto trimmedReplyTargetMessage = replyTargetMessage.trimmed();
+        const bool missingReplyTargetMessage =
+            trimmedReplyTargetMessage.isEmpty() ||
+            timestampOnlyPattern.match(trimmedReplyTargetMessage).hasMatch() ||
+            trimmedReplyTargetMessage.compare("[Super Chat]",
+                                              Qt::CaseInsensitive) == 0 ||
+            (replyTargetIsSuperChat && !replyTargetAmount.isEmpty() &&
+             trimmedReplyTargetMessage.compare(replyTargetAmount,
+                                               Qt::CaseInsensitive) == 0);
+        if (!replyParent && replyTargetIsSuperChat &&
+            missingReplyTargetMessage)
+        {
+            auto lookupName = replyTargetName;
+            while (lookupName.startsWith('@'))
+            {
+                lookupName.remove(0, 1);
+            }
+
+            const YouTubeChannel::ReplyTarget *cachedParent = nullptr;
+            for (auto it = channel->replyTargets_.cbegin();
+                 it != channel->replyTargets_.cend(); ++it)
+            {
+                if (it->timestamp > publishedAt)
+                {
+                    continue;
+                }
+                const bool matchesUserId =
+                    !replyTargetUserId.isEmpty() &&
+                    it->authorId == replyTargetUserId;
+                const bool matchesName =
+                    !lookupName.isEmpty() &&
+                    it->authorName.compare(lookupName,
+                                           Qt::CaseInsensitive) == 0;
+                if (!matchesUserId && !matchesName)
+                {
+                    continue;
+                }
+                if (cachedParent == nullptr ||
+                    it->timestamp > cachedParent->timestamp)
+                {
+                    cachedParent = &it.value();
+                }
+            }
+            if (cachedParent != nullptr)
+            {
+                replyTargetName = cachedParent->authorName;
+                replyTargetMessage = cachedParent->messageText;
+            }
+        }
+        if (!replyParent &&
+            (!replyTargetName.isEmpty() || !replyTargetUserId.isEmpty()) &&
+            missingReplyTargetMessage)
+        {
+            auto lookupName = replyTargetName;
+            while (lookupName.startsWith('@'))
+            {
+                lookupName.remove(0, 1);
+            }
+
+            for (const auto &candidate : channel->getMessageSnapshot())
+            {
+                if (!candidate->timestamp.isValid() ||
+                    candidate->timestamp > publishedAt)
+                {
+                    continue;
+                }
+                const auto ageSeconds =
+                    candidate->timestamp.secsTo(publishedAt);
+                if (ageSeconds < 0 ||
+                    (!replyTargetIsSuperChat && ageSeconds > 300))
+                {
+                    continue;
+                }
+                const bool matchesUserId =
+                    !replyTargetUserId.isEmpty() &&
+                    candidate->userID == replyTargetUserId;
+                const bool matchesName =
+                    candidate->displayName.compare(
+                        lookupName, Qt::CaseInsensitive) == 0 ||
+                    candidate->loginName.compare(
+                        lookupName, Qt::CaseInsensitive) == 0;
+                if (!matchesUserId && !matchesName)
+                {
+                    continue;
+                }
+                if (replyTargetIsSuperChat &&
+                    !candidate->messageText.startsWith(
+                        "[Super Chat", Qt::CaseInsensitive))
+                {
+                    continue;
+                }
+                if (!replyParent ||
+                    candidate->timestamp > replyParent->timestamp)
+                {
+                    replyParent = candidate;
+                }
+            }
+        }
+        if (replyParent)
+        {
+            if (!replyParent->displayName.isEmpty())
+            {
+                replyTargetName = replyParent->displayName;
+            }
+            else if (!replyParent->loginName.isEmpty())
+            {
+                replyTargetName = replyParent->loginName;
+            }
+            replyTargetIsSuperChat =
+                replyTargetIsSuperChat ||
+                replyParent->messageText.startsWith(
+                    "[Super Chat", Qt::CaseInsensitive);
+            if (!replyParent->messageText.isEmpty() &&
+                !timestampOnlyPattern
+                     .match(replyParent->messageText.trimmed())
+                     .hasMatch())
+            {
+                replyTargetMessage = replyParent->messageText;
+            }
+            builder->replyParent = replyParent;
+        }
+        if (timestampOnlyPattern.match(replyTargetMessage.trimmed()).hasMatch())
+        {
+            replyTargetMessage.clear();
+        }
+        if (replyTargetIsSuperChat)
+        {
+            static const QRegularExpression superChatPrefixPattern(
+                R"(^\s*\[Super Chat(?:\s+([^\]]+))?\]\s*)",
+                QRegularExpression::CaseInsensitiveOption);
+            const auto prefixMatch =
+                superChatPrefixPattern.match(replyTargetMessage);
+            if (prefixMatch.hasMatch())
+            {
+                const auto amount = prefixMatch.captured(1).trimmed();
+                replyTargetMessage.remove(0, prefixMatch.capturedLength());
+                if (!amount.isEmpty() &&
+                    !replyTargetMessage.trimmed().startsWith(
+                        amount, Qt::CaseInsensitive))
+                {
+                    auto originalText = replyTargetMessage.trimmed();
+                    if (!originalText.isEmpty())
+                    {
+                        originalText.prepend(' ');
+                    }
+                    replyTargetMessage = amount + originalText;
+                }
+            }
+        }
+        while (replyTargetName.startsWith('@'))
+        {
+            replyTargetName.remove(0, 1);
+        }
+        if (!replyTargetName.isEmpty() || !replyTargetMessage.isEmpty() ||
+            replyTargetIsSuperChat)
+        {
+            builder->flags.set(MessageFlag::ReplyMessage);
+            builder.emplace<ReplyCurveElement>();
+            builder.emplace<TextElement>(
+                "Replying to", MessageElementFlag::RepliedMessage,
+                MessageColor::System, FontStyle::ChatMediumSmall);
+
+            auto targetColor = MessageColor{MessageColor::Text};
+            if (replyParent && replyParent->usernameColor.isValid())
+            {
+                targetColor = MessageColor{replyParent->usernameColor};
+            }
+            else
+            {
+                const auto parsedTargetColor =
+                    colorFromYouTube(snippet.value("replyTargetNameColor"));
+                if (parsedTargetColor.isValid() &&
+                    parsedTargetColor.alpha() > 0)
+                {
+                    targetColor = MessageColor{parsedTargetColor};
+                }
+            }
+
+            if (!replyTargetName.isEmpty())
+            {
+                builder
+                    .emplace<TextElement>(
+                        "@" + replyTargetName + ':',
+                        MessageElementFlag::RepliedMessage, targetColor,
+                        FontStyle::ChatMediumSmall)
+                    ->setLink({Link::UserInfo, replyTargetName});
+            }
+            if (!replyTargetMessage.isEmpty())
+            {
+                builder.emplace<TextElement>(
+                    replyTargetMessage,
+                    MessageElementFlags({MessageElementFlag::RepliedMessage,
+                                         MessageElementFlag::Text}),
+                    MessageColor::Text, FontStyle::ChatMediumSmall);
+            }
+            if (replyTargetIsSuperChat)
+            {
+                auto &replyIcon = getResources().buttons.replyDark;
+                builder.emplace<CircularImageElement>(
+                    Image::fromResourcePixmap(replyIcon, 0.15), 2, Qt::gray,
+                    MessageElementFlag::RepliedMessage);
+                builder.emplace<TextElement>(
+                    "SUPERCHAT:", MessageElementFlag::RepliedMessage,
+                    MessageColor{QColor("#ff4b55")},
+                    FontStyle::ChatMediumBold);
+            }
+            builder.emplace<LinebreakElement>(
+                MessageElementFlag::RepliedMessage);
+        }
 
         builder.emplace<TimestampElement>(publishedAt.toLocalTime().time());
         auto appendYouTubeBadge = [&builder](const QString &glyph,
@@ -1700,21 +2490,26 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                 ->setTooltip(tooltip);
         };
         MessageColor usernameColor = MessageColor::Text;
+        QColor storedUsernameColor;
         if (isOwner)
         {
             usernameColor = QColor("#ff4b55");
+            storedUsernameColor = QColor("#ff4b55");
         }
         else if (isModerator)
         {
             usernameColor = QColor("#27ae60");
+            storedUsernameColor = QColor("#27ae60");
         }
         else if (isVerified)
         {
             usernameColor = QColor("#3ea6ff");
+            storedUsernameColor = QColor("#3ea6ff");
         }
         else if (isMember)
         {
             usernameColor = QColor("#21a67a");
+            storedUsernameColor = QColor("#21a67a");
         }
         if (type == "superChatEvent")
         {
@@ -1723,6 +2518,7 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             if (paidUsernameColor.isValid() && paidUsernameColor.alpha() > 0)
             {
                 usernameColor = paidUsernameColor;
+                storedUsernameColor = paidUsernameColor;
             }
         }
         else if (type == "newSponsorEvent" ||
@@ -1730,13 +2526,58 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                  type == "giftMembershipReceivedEvent")
         {
             usernameColor = QColor("#ffffff");
+            storedUsernameColor = QColor("#ffffff");
         }
-        if (isOwner)
+        else
+        {
+            const auto nativeNameColor =
+                colorFromYouTube(author.value("nameTextColor"));
+            if (nativeNameColor.isValid() && nativeNameColor.alpha() > 0)
+            {
+                usernameColor = nativeNameColor;
+                storedUsernameColor = nativeNameColor;
+            }
+        }
+        builder->usernameColor = storedUsernameColor;
+        bool hasOwnerBadgeImage = false;
+        bool hasModeratorBadgeImage = false;
+        bool hasMemberBadgeImage = false;
+        bool hasVerifiedBadgeImage = false;
+        for (const auto &badgeValue : author.value("badges").toArray())
+        {
+            const auto badge = badgeValue.toObject();
+            const auto iconType = badge.value("iconType").toString();
+            const auto tooltip = badge.value("tooltip").toString().toLower();
+            const bool isBadgeOwner = iconType == "OWNER" ||
+                                      tooltip.contains("owner") ||
+                                      tooltip.contains("broadcaster");
+            const bool isBadgeModerator = iconType == "MODERATOR" ||
+                                          tooltip.contains("moderator");
+            const bool isBadgeMember = badge.value("isMember").toBool();
+            const bool isBadgeVerified = iconType == "VERIFIED" ||
+                                         tooltip.contains("verified");
+            const auto badgeCategory =
+                isBadgeOwner || isBadgeModerator
+                    ? MessageElementFlag::BadgeChannelAuthority
+                    : (isBadgeMember ? MessageElementFlag::BadgeSubscription
+                                     : MessageElementFlag::BadgeVanity);
+            if (const auto badgeImage = getYouTubeBadge(badge))
+            {
+                builder.emplace<BadgeElement>(badgeImage, badgeCategory);
+                hasOwnerBadgeImage = hasOwnerBadgeImage || isBadgeOwner;
+                hasModeratorBadgeImage =
+                    hasModeratorBadgeImage || isBadgeModerator;
+                hasMemberBadgeImage = hasMemberBadgeImage || isBadgeMember;
+                hasVerifiedBadgeImage =
+                    hasVerifiedBadgeImage || isBadgeVerified;
+            }
+        }
+        if (isOwner && !hasOwnerBadgeImage)
         {
             appendYouTubeBadge("👑", "YouTube broadcaster",
                                MessageElementFlag::BadgeChannelAuthority);
         }
-        if (isModerator)
+        if (isModerator && !hasModeratorBadgeImage)
         {
             appendYouTubeBadge("🔧", "YouTube chat moderator",
                                MessageElementFlag::BadgeChannelAuthority);
@@ -1752,13 +2593,7 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             {
                 tooltip += QString(" — %1 months").arg(memberMonth);
             }
-            if (const auto memberBadge =
-                    getMembershipBadge(author.value("badges").toArray()))
-            {
-                builder.emplace<BadgeElement>(
-                    memberBadge, MessageElementFlag::BadgeSubscription);
-            }
-            else
+            if (!hasMemberBadgeImage)
             {
                 appendYouTubeBadge("💠", tooltip,
                                    MessageElementFlag::BadgeSubscription);
@@ -1779,26 +2614,77 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                 QString("YouTube membership: %1 months").arg(memberMonth),
                 MessageElementFlag::BadgeSubscription);
         }
-        if (isVerified)
+        if (isVerified && !hasVerifiedBadgeImage)
         {
             appendYouTubeBadge("✔️", "Verified YouTube account",
                                MessageElementFlag::BadgeVanity);
         }
-        builder.emplace<TextElement>(authorName + ':',
-                                     MessageElementFlag::Username,
-                                     usernameColor, FontStyle::ChatMediumBold);
-        const MessageColor bodyColor = type == "superChatEvent"
-                                           ? MessageColor(QColor(Qt::black))
-                                           : MessageColor::Text;
-        const auto replyTargetName =
-            snippet.value("replyTargetName").toString();
-        if (!replyTargetName.isEmpty())
+        auto *usernameElement = builder.emplace<TextElement>(
+            authorName + ':', MessageElementFlag::Username, usernameColor,
+            FontStyle::ChatMediumBold);
+        if (!builder->flags.has(MessageFlag::System))
         {
-            appendYouTubeText(builder, "💬 " + replyTargetName + ' ',
-                              bodyColor);
+            usernameElement->setLink({Link::UserInfo, authorName});
         }
+        const MessageColor bodyColor = MessageColor::Text;
         const auto messageRuns = snippet.value("messageRuns").toArray();
-        if (messageRuns.isEmpty())
+        if (type == "giftEvent")
+        {
+            const auto giftName = giftDetails.value("giftName").toString();
+            const QJsonObject giftRun{
+                {"emojiId", giftName},
+                {"text", giftName},
+                {"label", giftName.isEmpty() ? QStringLiteral("YouTube gift")
+                                              : giftName},
+                {"thumbnails", giftDetails.value("thumbnails")},
+                {"giftUrl", giftDetails.value("giftUrl")},
+                {"isGift", true},
+            };
+            const auto giftImage = getCustomEmoji(giftRun);
+            appendYouTubeText(builder,
+                              text + (giftImage ? QStringLiteral(" ")
+                                                : QString{}),
+                              bodyColor);
+            if (giftImage)
+            {
+                builder.emplace<EmoteElement>(giftImage,
+                                              MessageElementFlag::EmojiAll);
+            }
+        }
+        else if (type == "superStickerEvent")
+        {
+            const auto stickerMetadata =
+                snippet.value("superStickerDetails")
+                    .toObject()
+                    .value("superStickerMetadata")
+                    .toObject();
+            const auto amount = snippet.value("superStickerDetails")
+                                    .toObject()
+                                    .value("amountDisplayString")
+                                    .toString();
+            if (!amount.isEmpty())
+            {
+                appendYouTubeText(builder, amount + ' ', bodyColor);
+            }
+            const QJsonObject stickerRun{
+                {"emojiId", stickerMetadata.value("stickerId")},
+                {"text", stickerMetadata.value("altText")},
+                {"label", stickerMetadata.value("altText")},
+                {"thumbnails", stickerMetadata.value("thumbnails")},
+            };
+            if (const auto sticker = getCustomEmoji(stickerRun))
+            {
+                builder.emplace<EmoteElement>(sticker,
+                                              MessageElementFlag::EmojiAll);
+            }
+            else
+            {
+                appendYouTubeText(builder,
+                                  stickerMetadata.value("altText").toString(),
+                                  bodyColor);
+            }
+        }
+        else if (messageRuns.isEmpty())
         {
             appendYouTubeText(builder, text, bodyColor);
         }
@@ -1839,7 +2725,12 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
             }
         }
 
-        if (!authorName.isEmpty() && !builder->id.isEmpty())
+        if (!builder->id.isEmpty() && type != "pollEvent" &&
+            type != "chatEndedEvent" && type != "chatModeChangeEvent" &&
+            type != "sponsorOnlyModeStartedEvent" &&
+            type != "sponsorOnlyModeEndedEvent" &&
+            type != "viewerEngagementMessageEvent" && type != "tombstone" &&
+            type != "raidEvent")
         {
             auto &replyIcon = getResources().buttons.replyDark;
             builder
@@ -1848,7 +2739,94 @@ void YouTubeProvider::processMessageBatch(YouTubeChannel *channel,
                     MessageElementFlag::ReplyButton)
                 ->setLink({Link::ReplyToMessage, builder->id});
         }
-        channel->addMessage(builder.release(), MessageContext::Original);
+
+        HighlightAlert alert;
+        bool matchedHighlight = false;
+        if (!builder->flags.has(MessageFlag::System))
+        {
+            MessageParseArgs args;
+            const std::vector<TwitchBadge> noTwitchBadges;
+            const auto currentAccount = this->accountName();
+            auto [highlighted, result] = getApp()->getHighlights()->check({
+                .args = args,
+                .twitchBadges = noTwitchBadges,
+                .senderName = authorName,
+                .originalMessage = text,
+                .messageFlags = builder.message().flags,
+                .self = !currentAccount.isEmpty() &&
+                        currentAccount.compare(authorName,
+                                               Qt::CaseInsensitive) == 0,
+                .runContext = filters::RunContext{
+                    .message = builder.message(),
+                    .channel = channel,
+                },
+            });
+            if (highlighted)
+            {
+                matchedHighlight = true;
+                builder->flags.set(MessageFlag::Highlighted);
+                if (!builder->highlightColor && result.color)
+                {
+                    builder->highlightColor = result.color;
+                }
+                if (result.showInMentions)
+                {
+                    builder->flags.set(MessageFlag::ShowInMentions);
+                }
+                alert.sound = result.sound;
+                alert.windowAlert = result.alert;
+            }
+        }
+
+        auto message = builder.release();
+        channel->applySimilarityFilters(message);
+        const bool showMentions =
+            message->flags.has(MessageFlag::Highlighted) &&
+            message->flags.has(MessageFlag::ShowInMentions);
+        QString oldMessageId;
+        if (type == "pollEvent")
+        {
+            oldMessageId = QStringLiteral("youtube-active-poll");
+        }
+        else if (type == "chatEndedEvent")
+        {
+            oldMessageId = QStringLiteral("youtube-chat-ended");
+        }
+        else if (type == "raidEvent" && action == "banner" &&
+                 !targetItemId.isEmpty())
+        {
+            oldMessageId = QStringLiteral("youtube-raid-") + targetItemId;
+        }
+        else
+        {
+            oldMessageId = targetItemId.isEmpty() ? message->id : targetItemId;
+        }
+        const auto oldMessage = channel->findMessageByID(oldMessageId);
+        const bool replacing = action == "replace" || action == "banner" ||
+                               type == "pollEvent" || oldMessage != nullptr;
+        if (replacing && oldMessage)
+        {
+            channel->replaceMessage(oldMessage, message);
+        }
+        else if (!oldMessage)
+        {
+            channel->addMessage(message, MessageContext::Original);
+        }
+
+        if (!initialBatch && matchedHighlight &&
+            (!message->flags.has(MessageFlag::Similar) ||
+             (!getSettings()->hideSimilar &&
+              getSettings()->shownSimilarTriggerHighlights)))
+        {
+            MessageBuilder::triggerHighlights(channel, alert);
+        }
+        if (!initialBatch && showMentions && !oldMessage &&
+            channel->sinkTraits().has(
+                MessageSinkTrait::AddMentionsToGlobalChannel))
+        {
+            getApp()->getTwitch()->getMentionsChannel()->addMessage(
+                message, MessageContext::Original);
+        }
     }
 }
 

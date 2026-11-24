@@ -10,6 +10,7 @@
 #include "common/Version.hpp"
 #include "providers/IvrApi.hpp"
 #include "providers/NetworkConfigurationProvider.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "RunGui.hpp"
 #include "singletons/CrashHandler.hpp"
@@ -90,6 +91,13 @@ int main(int argc, char **argv)
         return 1;
     }
     ipc::initPaths(paths.get());
+    initializeYouTubeDiagnostics(paths->messageLogDirectory);
+    logYouTubeDiagnostic(
+        "process_start",
+        QString("pid=%1 launch_mode=%2")
+            .arg(QCoreApplication::applicationPid())
+            .arg(args.shouldRunBrowserExtensionHost ? "browser_extension_host"
+                                                    : "gui"));
 
 #ifdef CHATTERINO_WITH_CRASHPAD
     const auto crashpadHandler = installCrashHandler(args, *paths);
@@ -151,5 +159,6 @@ int main(int argc, char **argv)
 
         runGui(a, modes, *paths, settings, args, updates);
     }
+    logYouTubeDiagnostic("main_return", "exit_code=0");
     return 0;
 }

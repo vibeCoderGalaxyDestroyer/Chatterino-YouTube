@@ -9,6 +9,7 @@
 #include "common/Modes.hpp"
 #include "common/network/NetworkManager.hpp"
 #include "common/QLogging.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "singletons/CrashHandler.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Resources.hpp"
@@ -279,6 +280,7 @@ void runGui(QApplication &a, const Modes &modes, const Paths &paths,
     updates.checkForUpdates();
 
     QObject::connect(qApp, &QApplication::aboutToQuit, [] {
+        logYouTubeDiagnostic("application_about_to_quit", "signal_received");
         auto *app = dynamic_cast<Application *>(tryGetApp());
         assert(app != nullptr);
         app->aboutToQuit();
@@ -287,11 +289,15 @@ void runGui(QApplication &a, const Modes &modes, const Paths &paths,
         getSettings()->disableSave();
 
         app->stop();
+        logYouTubeDiagnostic("application_about_to_quit",
+                             "application_stop_completed");
     });
 
     Application app(settings, paths, args, modes, updates);
     app.initialize(settings, paths);
     app.run();
+    logYouTubeDiagnostic("application_run_returned",
+                         "gui_cleanup_starting");
 
     chatterino::NetworkManager::deinit();
 

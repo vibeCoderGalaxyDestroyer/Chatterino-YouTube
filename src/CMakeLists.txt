@@ -499,6 +499,8 @@ set(SOURCE_FILES
         providers/twitch/ChannelPointReward.hpp
         providers/youtube/YouTubeChannel.cpp
         providers/youtube/YouTubeChannel.hpp
+        providers/youtube/YouTubeDiagnostics.cpp
+        providers/youtube/YouTubeDiagnostics.hpp
         providers/youtube/YouTubeInnertubeReader.cpp
         providers/youtube/YouTubeInnertubeReader.hpp
         providers/youtube/YouTubeProvider.cpp

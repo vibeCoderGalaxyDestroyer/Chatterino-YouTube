@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
+#include <QQueue>
 #include <QString>
 #include <QStringList>
 #include <QTcpServer>
@@ -45,7 +46,7 @@ public:
     void loadVideo(YouTubeChannel *channel);
     void loadVideoDetails(YouTubeChannel *channel);
     void loadLiveVideoForChannel(YouTubeChannel *channel);
-    void searchLiveVideo(YouTubeChannel *channel, const QString &channelId);
+    void checkLiveStatus(YouTubeChannel *channel);
     void deleteMessage(YouTubeChannel *channel, const QString &messageId);
     void banUser(YouTubeChannel *channel, const QString &userId,
                  int durationSeconds);
@@ -57,6 +58,7 @@ public:
 private:
     QHash<QString, std::weak_ptr<YouTubeChannel>> channels_;
     QHash<QString, std::shared_ptr<const Emote>> customEmotes_;
+    QQueue<QString> customEmoteCacheOrder_;
     QTcpServer oauthServer_;
     QString oauthState_;
     QString codeVerifier_;
@@ -66,8 +68,12 @@ private:
     quint64 accountNameRequestId_{};
 
     void loadAccountName();
-    void processMessageBatch(YouTubeChannel *channel, const QJsonObject &root);
+    void processMessageBatch(YouTubeChannel *channel, const QJsonObject &root,
+                             bool initialBatch);
     void startInnertubeReader(YouTubeChannel *channel);
+    void startLiveStatusMonitoring(YouTubeChannel *channel,
+                                   const QString &liveStatusUrl);
+    void loadLiveVideoForChannelWithApi(YouTubeChannel *channel);
     void exchangeAuthorizationCode(const QString &code,
                                    const QString &redirectUri);
     void refreshAccessToken(std::function<void(bool)> callback);

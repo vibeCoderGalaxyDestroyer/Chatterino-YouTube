@@ -38,6 +38,7 @@ public:
 
     void setSelected(bool selected_);
     SettingsPage *page();
+    SettingsPage *pageIfCreated() const;
     SettingsTabId id() const;
 
     const QString &name() const;

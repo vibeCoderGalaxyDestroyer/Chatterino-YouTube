@@ -1224,7 +1224,17 @@ void SplitHeader::updateChannelText()
         }
         else if (!youtubeChannel->videoTitle().isEmpty())
         {
+            if (youtubeChannel->hasKnownLiveStatus())
+            {
+                title += " (offline)";
+                this->tooltipText_ = "YouTube channel is offline";
+            }
             title += " - " + youtubeChannel->videoTitle().simplified();
+        }
+        else if (youtubeChannel->hasKnownLiveStatus())
+        {
+            title += " (offline)";
+            this->tooltipText_ = "YouTube channel is offline";
         }
     }
 

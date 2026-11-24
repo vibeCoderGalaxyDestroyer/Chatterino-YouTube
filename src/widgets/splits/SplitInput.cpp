@@ -37,6 +37,7 @@
 #include "widgets/splits/SplitContainer.hpp"
 
 #include <QCompleter>
+#include <QFontMetrics>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
@@ -1821,8 +1822,14 @@ void SplitInput::checkSpellingChanged()
 void SplitInput::updateFonts()
 {
     auto *app = getApp();
-    this->ui_.textEdit->setFont(
-        app->getFonts()->getFont(FontStyle::ChatMedium, this->scale()));
+    const auto inputFont =
+        app->getFonts()->getFont(FontStyle::ChatMedium, this->scale());
+    this->ui_.textEdit->setFont(inputFont);
+    const QFontMetrics inputFontMetrics(inputFont);
+    const auto inputMargins = this->ui_.textEdit->contentsMargins();
+    this->ui_.textEdit->setMinimumHeight(
+        inputFontMetrics.lineSpacing() + inputMargins.top() +
+        inputMargins.bottom() + int(6 * this->scale()));
 
     // NOTE: We're using TimestampMedium here to get a font that uses the tnum font feature,
     // meaning numbers get equal width & don't bounce around while the user is typing.

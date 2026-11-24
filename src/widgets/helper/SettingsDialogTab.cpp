@@ -55,6 +55,11 @@ SettingsPage *SettingsDialogTab::page()
     return this->page_;
 }
 
+SettingsPage *SettingsDialogTab::pageIfCreated() const
+{
+    return this->page_;
+}
+
 void SettingsDialogTab::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);

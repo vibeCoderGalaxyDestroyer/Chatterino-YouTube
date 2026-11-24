@@ -15,12 +15,16 @@
 #include "widgets/helper/EditableModelView.hpp"
 
 #include <QDialogButtonBox>
+#include <QFrame>
+#include <QGroupBox>
+#include <QHideEvent>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QStackedWidget>
 #include <QTableView>
 #include <QVBoxLayout>
 
@@ -35,33 +39,79 @@ AccountsPage::AccountsPage()
     LayoutCreator<AccountsPage> layoutCreator(this);
     auto layout = layoutCreator.emplace<QVBoxLayout>().withoutMargin();
 
-    layout.emplace<QLabel>(
-        "YouTube API key (for channel lookup; optional for video links)");
-    auto *youtubeApiKey = layout.emplace<QLineEdit>().getElement();
-    youtubeApiKey->setEchoMode(QLineEdit::Password);
+    auto *youtubeCredentials =
+        layout.emplace<QGroupBox>("YouTube credentials").getElement();
+    auto *youtubeCredentialsLayout = new QVBoxLayout(youtubeCredentials);
+    this->youtubeCredentialsStack_ =
+        new QStackedWidget(youtubeCredentials);
+    youtubeCredentialsLayout->addWidget(this->youtubeCredentialsStack_);
+
+    auto *hiddenPanel = new QFrame(this->youtubeCredentialsStack_);
+    hiddenPanel->setObjectName("youtubeCredentialsHiddenPanel");
+    hiddenPanel->setStyleSheet(
+        "QFrame#youtubeCredentialsHiddenPanel {"
+        "background-color: palette(mid);"
+        "border: 1px solid palette(midlight);"
+        "border-radius: 4px;"
+        "}");
+    auto *hiddenPanelLayout = new QVBoxLayout(hiddenPanel);
+    hiddenPanelLayout->addStretch();
+    auto *hiddenLabel =
+        new QLabel("YouTube credentials are hidden", hiddenPanel);
+    hiddenLabel->setAlignment(Qt::AlignCenter);
+    hiddenPanelLayout->addWidget(hiddenLabel);
+    auto *revealButton =
+        new QPushButton("Reveal credentials", hiddenPanel);
+    hiddenPanelLayout->addWidget(revealButton, 0, Qt::AlignCenter);
+    hiddenPanelLayout->addStretch();
+    this->youtubeCredentialsStack_->addWidget(hiddenPanel);
+
+    auto *credentialPanel = new QWidget(this->youtubeCredentialsStack_);
+    auto *credentialPanelLayout = new QVBoxLayout(credentialPanel);
+
+    credentialPanelLayout->addWidget(new QLabel(
+        "YouTube API key (for channel lookup; optional for video links)",
+        credentialPanel));
+    auto *youtubeApiKey = new QLineEdit(credentialPanel);
     youtubeApiKey->setText(getSettings()->youtubeApiKey.getValue());
+    credentialPanelLayout->addWidget(youtubeApiKey);
     QObject::connect(youtubeApiKey, &QLineEdit::textChanged,
                      [](const QString &value) {
                          getSettings()->youtubeApiKey.setValue(value);
                      });
 
-    layout.emplace<QLabel>("Google Desktop OAuth client ID (for sign-in)");
-    auto *youtubeClientId = layout.emplace<QLineEdit>().getElement();
+    credentialPanelLayout->addWidget(
+        new QLabel("Google Desktop OAuth client ID (for sign-in)",
+                   credentialPanel));
+    auto *youtubeClientId = new QLineEdit(credentialPanel);
     youtubeClientId->setText(getSettings()->youtubeOAuthClientId.getValue());
+    credentialPanelLayout->addWidget(youtubeClientId);
     QObject::connect(youtubeClientId, &QLineEdit::textChanged,
                      [](const QString &value) {
                          getSettings()->youtubeOAuthClientId.setValue(value);
                      });
 
-    layout.emplace<QLabel>("Google OAuth client secret (if required)");
-    auto *youtubeClientSecret = layout.emplace<QLineEdit>().getElement();
-    youtubeClientSecret->setEchoMode(QLineEdit::Password);
+    credentialPanelLayout->addWidget(
+        new QLabel("Google OAuth client secret (if required)",
+                   credentialPanel));
+    auto *youtubeClientSecret = new QLineEdit(credentialPanel);
     youtubeClientSecret->setText(
         getSettings()->youtubeOAuthClientSecret.getValue());
+    credentialPanelLayout->addWidget(youtubeClientSecret);
     QObject::connect(youtubeClientSecret, &QLineEdit::textChanged,
                      [](const QString &value) {
                          getSettings()->youtubeOAuthClientSecret.setValue(value);
                      });
+
+    auto *hideButton = new QPushButton("Hide credentials", credentialPanel);
+    credentialPanelLayout->addWidget(hideButton, 0, Qt::AlignRight);
+    this->youtubeCredentialsStack_->addWidget(credentialPanel);
+
+    QObject::connect(revealButton, &QPushButton::clicked, this, [this] {
+        this->youtubeCredentialsStack_->setCurrentIndex(1);
+    });
+    QObject::connect(hideButton, &QPushButton::clicked, this,
+                     [this] { this->hideYouTubeCredentials(); });
 
     auto *youtubeStatus = layout.emplace<QLabel>().getElement();
     youtubeStatus->setWordWrap(true);
@@ -147,6 +197,20 @@ AccountsPage::AccountsPage()
 
     //        getApp()->getAccounts()->Twitch.removeUser(selectedUser);
     //    });
+}
+
+void AccountsPage::hideYouTubeCredentials()
+{
+    if (this->youtubeCredentialsStack_)
+    {
+        this->youtubeCredentialsStack_->setCurrentIndex(0);
+    }
+}
+
+void AccountsPage::hideEvent(QHideEvent *event)
+{
+    this->hideYouTubeCredentials();
+    SettingsPage::hideEvent(event);
 }
 
 }  // namespace chatterino

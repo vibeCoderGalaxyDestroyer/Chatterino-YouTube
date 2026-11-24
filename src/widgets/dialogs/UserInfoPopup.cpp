@@ -8,6 +8,8 @@
 #include "common/Channel.hpp"
 #include "common/Literals.hpp"
 #include "common/QLogging.hpp"
+#include "common/network/NetworkRequest.hpp"
+#include "common/network/NetworkResult.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/highlights/HighlightBlacklistUser.hpp"
@@ -17,6 +19,7 @@
 #include "messages/MessageBuilder.hpp"
 #include "providers/IvrApi.hpp"
 #include "providers/pronouns/Pronouns.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
@@ -49,15 +52,24 @@
 
 #include <QCheckBox>
 #include <QDesktopServices>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QMessageBox>
 #include <QMetaEnum>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QStringBuilder>
 
 namespace {
 constexpr QStringView TEXT_FOLLOWERS = u"Followers: %1";
+constexpr QStringView TEXT_SUBSCRIBERS = u"Subscribers: %1";
+constexpr QStringView TEXT_SUBSCRIBED = u"Subscribed to this channel: %1";
 constexpr QStringView TEXT_CREATED = u"Created: %1";
 constexpr QStringView TEXT_TITLE = u"%1's Usercard - #%2";
 constexpr QStringView TEXT_USER_ID = u"ID: ";
@@ -67,6 +79,315 @@ constexpr QStringView TEXT_UNSPECIFIED = u"(unspecified)";
 constexpr QStringView TEXT_LOADING = u"(loading...)";
 
 using namespace chatterino;
+
+struct YouTubeUserCardData {
+    QString subscriberCount;
+    QString createdDate;
+    QString avatarUrl;
+    bool pageParsed{};
+    QDateTime fetchedAt;
+};
+
+QHash<QString, YouTubeUserCardData> youtubeUserCardCache;
+
+QJsonValue findYouTubeJsonValue(const QJsonValue &value, const QString &key,
+                                int depth = 0)
+{
+    if (depth > 80)
+    {
+        return {};
+    }
+    if (value.isObject())
+    {
+        const auto object = value.toObject();
+        const auto candidate = object.value(key);
+        if (!candidate.isUndefined() && !candidate.isNull() &&
+            (!candidate.isObject() || !candidate.toObject().isEmpty()) &&
+            (!candidate.isArray() || !candidate.toArray().isEmpty()))
+        {
+            return candidate;
+        }
+        for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+        {
+            const auto found = findYouTubeJsonValue(it.value(), key, depth + 1);
+            if (!found.isUndefined())
+            {
+                return found;
+            }
+        }
+    }
+    else if (value.isArray())
+    {
+        for (const auto &child : value.toArray())
+        {
+            const auto found = findYouTubeJsonValue(child, key, depth + 1);
+            if (!found.isUndefined())
+            {
+                return found;
+            }
+        }
+    }
+    return {};
+}
+
+QString youtubeTextValue(const QJsonValue &value)
+{
+    if (value.isString())
+    {
+        return value.toString();
+    }
+    if (value.isDouble())
+    {
+        return QString::number(value.toInteger());
+    }
+    const auto object = value.toObject();
+    for (const auto *key : {"content", "simpleText"})
+    {
+        const auto text = object.value(QLatin1String(key)).toString();
+        if (!text.isEmpty())
+        {
+            return text;
+        }
+    }
+    QString result;
+    for (const auto &run : object.value("runs").toArray())
+    {
+        result += run.toObject().value("text").toString();
+    }
+    return result;
+}
+
+QString findYouTubeSubscriberCount(const QJsonValue &value, int depth = 0)
+{
+    if (depth > 80)
+    {
+        return {};
+    }
+
+    static const QRegularExpression countPattern(
+        R"((\d[\d,.]*(?:\s*[KMB])?)\s+subscribers?)",
+        QRegularExpression::CaseInsensitiveOption);
+    if (value.isString())
+    {
+        const auto match = countPattern.match(value.toString());
+        return match.hasMatch() ? match.captured(1).trimmed() : QString{};
+    }
+    if (value.isObject())
+    {
+        const auto object = value.toObject();
+        for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+        {
+            if (it.key().contains("subscriber", Qt::CaseInsensitive))
+            {
+                if (it.key().compare("subscriberCount",
+                                     Qt::CaseInsensitive) == 0 &&
+                    it.value().isDouble())
+                {
+                    return QString::number(it.value().toInteger());
+                }
+                const auto match = countPattern.match(youtubeTextValue(it.value()));
+                if (match.hasMatch())
+                {
+                    return match.captured(1).trimmed();
+                }
+            }
+            const auto found = findYouTubeSubscriberCount(it.value(), depth + 1);
+            if (!found.isEmpty())
+            {
+                return found;
+            }
+        }
+    }
+    else if (value.isArray())
+    {
+        for (const auto &child : value.toArray())
+        {
+            const auto found = findYouTubeSubscriberCount(child, depth + 1);
+            if (!found.isEmpty())
+            {
+                return found;
+            }
+        }
+    }
+    return {};
+}
+
+QString youtubeJoinedDateFromHtml(const QByteArray &html)
+{
+    static const QRegularExpression joinedDatePattern(
+        R"re("joinedDateText"\s*:\s*\{\s*"content"\s*:\s*"((?:\\.|[^"\\])*)")re");
+    const auto match =
+        joinedDatePattern.match(QString::fromUtf8(html));
+    if (!match.hasMatch())
+    {
+        return {};
+    }
+
+    const auto encoded =
+        QByteArray("[") + match.captured(1).toUtf8() + QByteArray("]");
+    const auto decoded = QJsonDocument::fromJson(encoded).array();
+    return decoded.isEmpty() ? QString{} : decoded.first().toString();
+}
+
+QJsonObject extractYouTubeInitialData(const QByteArray &html)
+{
+    constexpr char markerText[] = "ytInitialData";
+    constexpr qsizetype markerLength = sizeof(markerText) - 1;
+    qsizetype searchFrom = 0;
+    while (searchFrom < html.size())
+    {
+        const auto marker = html.indexOf(markerText, searchFrom);
+        if (marker < 0)
+        {
+            break;
+        }
+
+        const auto markerEnd = marker + markerLength;
+        const auto equals = html.indexOf('=', markerEnd);
+        if (equals < 0 || equals - markerEnd > 32)
+        {
+            searchFrom = markerEnd;
+            continue;
+        }
+
+        const auto start = html.indexOf('{', equals + 1);
+        const auto statementEnd = html.indexOf(';', equals + 1);
+        if (start < 0 || (statementEnd >= 0 && statementEnd < start))
+        {
+            searchFrom = markerEnd;
+            continue;
+        }
+
+        qsizetype depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (qsizetype i = start; i < html.size(); ++i)
+        {
+            const auto character = html.at(i);
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (character == '\\')
+                {
+                    escaped = true;
+                }
+                else if (character == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+            if (character == '"')
+            {
+                inString = true;
+            }
+            else if (character == '{')
+            {
+                ++depth;
+            }
+            else if (character == '}' && --depth == 0)
+            {
+                QJsonParseError parseError;
+                const auto document = QJsonDocument::fromJson(
+                    html.mid(start, i - start + 1), &parseError);
+                if (parseError.error == QJsonParseError::NoError &&
+                    !document.object().isEmpty())
+                {
+                    return document.object();
+                }
+                searchFrom = i + 1;
+                break;
+            }
+        }
+        if (searchFrom <= marker)
+        {
+            searchFrom = markerEnd;
+        }
+    }
+    return {};
+}
+
+YouTubeUserCardData parseYouTubeUserCardData(const QByteArray &html)
+{
+    YouTubeUserCardData result;
+    const auto initialData = extractYouTubeInitialData(html);
+    if (initialData.isEmpty())
+    {
+        result.createdDate = youtubeJoinedDateFromHtml(html);
+        if (!result.createdDate.isEmpty())
+        {
+            result.pageParsed = true;
+            static const QRegularExpression joinedPrefix(
+                R"(^\s*Joined\s+)",
+                QRegularExpression::CaseInsensitiveOption);
+            result.createdDate.remove(joinedPrefix);
+        }
+        return result;
+    }
+    result.pageParsed = true;
+
+    result.subscriberCount = youtubeTextValue(
+        findYouTubeJsonValue(initialData, "subscriberCountText"));
+    if (result.subscriberCount.isEmpty())
+    {
+        result.subscriberCount = findYouTubeSubscriberCount(
+            findYouTubeJsonValue(initialData, "pageHeaderViewModel"));
+    }
+    static const QRegularExpression subscriberSuffix(
+        R"(\s+subscribers?$)", QRegularExpression::CaseInsensitiveOption);
+    result.subscriberCount.remove(subscriberSuffix);
+
+    result.createdDate = youtubeTextValue(
+        findYouTubeJsonValue(initialData, "aboutChannelViewModel")
+            .toObject()
+            .value("joinedDateText"));
+    if (result.createdDate.isEmpty())
+    {
+        result.createdDate = youtubeTextValue(
+            findYouTubeJsonValue(initialData, "joinedDateText"));
+    }
+    if (result.createdDate.isEmpty())
+    {
+        result.createdDate = youtubeJoinedDateFromHtml(html);
+    }
+    static const QRegularExpression joinedPrefix(
+        R"(^\s*Joined\s+)", QRegularExpression::CaseInsensitiveOption);
+    result.createdDate.remove(joinedPrefix);
+
+    const auto avatarModel =
+        findYouTubeJsonValue(initialData, "decoratedAvatarViewModel");
+    auto sources = findYouTubeJsonValue(avatarModel, "sources").toArray();
+    for (const auto &source : sources)
+    {
+        const auto url = source.toObject().value("url").toString();
+        if (!url.isEmpty())
+        {
+            result.avatarUrl = url;
+        }
+    }
+    if (result.avatarUrl.isEmpty())
+    {
+        const auto header =
+            findYouTubeJsonValue(initialData, "c4TabbedHeaderRenderer")
+                .toObject();
+        const auto thumbnails = header.value("avatar")
+                                    .toObject()
+                                    .value("thumbnails")
+                                    .toArray();
+        for (const auto &thumbnail : thumbnails)
+        {
+            const auto url = thumbnail.toObject().value("url").toString();
+            if (!url.isEmpty())
+            {
+                result.avatarUrl = url;
+            }
+        }
+    }
+    return result;
+}
 
 Label *addCopyableLabel(LayoutCreator<QHBoxLayout> box, const char *tooltip,
                         PixmapButton **copyButton = nullptr)
@@ -287,6 +608,16 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                 switch (button)
                 {
                     case Qt::LeftButton: {
+                        if (this->channel_ &&
+                            this->channel_->getType() == Channel::Type::YouTube)
+                        {
+                            if (!this->youtubeProfileUrl_.isEmpty())
+                            {
+                                QDesktopServices::openUrl(
+                                    QUrl(this->youtubeProfileUrl_));
+                            }
+                            break;
+                        }
                         QDesktopServices::openUrl(
                             QUrl("https://www.twitch.tv/" +
                                  this->userName_.toLower()));
@@ -294,8 +625,8 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                     break;
 
                     case Qt::RightButton: {
-                        // don't raise open context menu if there's no avatar (probably in cases when invalid user's usercard was opened)
-                        if (this->avatarUrl_.isEmpty())
+                        if (this->avatarUrl_.isEmpty() &&
+                            this->youtubeProfileUrl_.isEmpty())
                         {
                             return;
                         }
@@ -303,47 +634,67 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
                         auto *menu = new QMenu(this);
                         menu->setAttribute(Qt::WA_DeleteOnClose);
 
-                        auto avatarUrl = this->avatarUrl_;
-
-                        // add context menu actions
-                        menu->addAction("Open avatar in browser", [avatarUrl] {
-                            QDesktopServices::openUrl(QUrl(avatarUrl));
-                        });
-
-                        menu->addAction("Copy avatar link", [avatarUrl] {
-                            crossPlatformCopy(avatarUrl);
-                        });
-
-                        // we need to assign login name for msvc compilation
-                        auto loginName = this->userName_.toLower();
-                        menu->addAction(
-                            "Open channel in a new popup window", this,
-                            [loginName] {
-                                auto *app = getApp();
-                                auto &window = app->getWindows()->createWindow(
-                                    WindowType::Popup, {});
-                                auto *split = window.getNotebook()
-                                                  .getOrAddSelectedPage()
-                                                  ->appendNewSplit(false);
-                                split->setChannel(
-                                    app->getTwitch()->getOrAddChannel(
-                                        loginName.toLower()));
+                        if (!this->avatarUrl_.isEmpty())
+                        {
+                            const auto avatarUrl = this->avatarUrl_;
+                            menu->addAction(
+                                "Open avatar in browser", [avatarUrl] {
+                                    QDesktopServices::openUrl(QUrl(avatarUrl));
+                                });
+                            menu->addAction("Copy avatar link", [avatarUrl] {
+                                crossPlatformCopy(avatarUrl);
                             });
+                        }
 
-                        menu->addAction(
-                            "Open channel in a new tab", this, [loginName] {
-                                ChannelPtr channel =
-                                    getApp()->getTwitch()->getOrAddChannel(
-                                        loginName);
-                                auto &nb = getApp()
-                                               ->getWindows()
-                                               ->getMainWindow()
-                                               .getNotebook();
-                                SplitContainer *container = nb.addPage(true);
-                                Split *split = new Split(container);
-                                split->setChannel(channel);
-                                container->insertSplit(split);
-                            });
+                        if (this->channel_ &&
+                            this->channel_->getType() == Channel::Type::YouTube)
+                        {
+                            const auto profileUrl = this->youtubeProfileUrl_;
+                            if (!profileUrl.isEmpty())
+                            {
+                                menu->addAction(
+                                    "Open YouTube channel", [profileUrl] {
+                                        QDesktopServices::openUrl(
+                                            QUrl(profileUrl));
+                                    });
+                            }
+                        }
+                        else
+                        {
+                            // we need to assign login name for msvc compilation
+                            const auto loginName =
+                                this->userName_.toLower();
+                            menu->addAction(
+                                "Open channel in a new popup window", this,
+                                [loginName] {
+                                    auto *app = getApp();
+                                    auto &window =
+                                        app->getWindows()->createWindow(
+                                            WindowType::Popup, {});
+                                    auto *split = window.getNotebook()
+                                                      .getOrAddSelectedPage()
+                                                      ->appendNewSplit(false);
+                                    split->setChannel(
+                                        app->getTwitch()->getOrAddChannel(
+                                            loginName));
+                                });
+
+                            menu->addAction(
+                                "Open channel in a new tab", this,
+                                [loginName] {
+                                    ChannelPtr channel =
+                                        getApp()->getTwitch()->getOrAddChannel(
+                                            loginName);
+                                    auto &nb = getApp()
+                                                   ->getWindows()
+                                                   ->getMainWindow()
+                                                   .getNotebook();
+                                    SplitContainer *container = nb.addPage(true);
+                                    Split *split = new Split(container);
+                                    split->setChannel(channel);
+                                    container->insertSplit(split);
+                                });
+                        }
                         menu->popup(QCursor::pos());
                         menu->raise();
                     }
@@ -874,7 +1225,7 @@ void UserInfoPopup::setData(const QString &name,
     // If we're opening by ID, this will be called as soon as we get the information from twitch
 
     auto type = this->channel_->getType();
-    if (type == Channel::Type::TwitchLive ||
+    if (type == Channel::Type::YouTube || type == Channel::Type::TwitchLive ||
         type == Channel::Type::TwitchWhispers || type == Channel::Type::Misc)
     {
         // not a normal twitch channel, the url opened by the button will be invalid, so hide the button
@@ -940,6 +1291,176 @@ void UserInfoPopup::updateLatestMessages()
 
 void UserInfoPopup::updateUserData()
 {
+    if (this->channel_ &&
+        this->channel_->getType() == Channel::Type::YouTube)
+    {
+        this->youtubeProfileUrl_.clear();
+        this->avatarUrl_.clear();
+        this->ui_.avatarButton->setPixmap(QPixmap());
+        this->ui_.followerCountLabel->setText(
+            TEXT_SUBSCRIBERS.arg(TEXT_LOADING));
+        this->ui_.createdDateLabel->setText(
+            TEXT_CREATED.arg(TEXT_LOADING));
+        this->ui_.followageLabel->setText(
+            TEXT_SUBSCRIBED.arg(u"(not available in live chat)"));
+        this->ui_.followageLabel->setToolTip(
+            "YouTube live chat does not expose when another viewer "
+            "subscribed to the channel.");
+        this->ui_.followageLabel->show();
+        this->ui_.liveIndicator->hide();
+        this->ui_.subageLabel->hide();
+        if (this->ui_.pronounsLabel != nullptr)
+        {
+            this->ui_.pronounsLabel->hide();
+        }
+        this->ui_.block->hide();
+        this->ui_.ignoreHighlights->hide();
+        this->ui_.notesAdd->hide();
+
+        auto channelId = this->userName_.isEmpty() ? this->userId_ : QString{};
+        if (!this->userName_.isEmpty() && this->underlyingChannel_)
+        {
+            MessagePtr latestMessage;
+            for (const auto &message :
+                 this->underlyingChannel_->getMessageSnapshot())
+            {
+                if (message->userID.isEmpty() ||
+                    (message->displayName.compare(
+                         this->userName_, Qt::CaseInsensitive) != 0 &&
+                     message->loginName.compare(this->userName_,
+                                                Qt::CaseInsensitive) != 0))
+                {
+                    continue;
+                }
+                if (!latestMessage ||
+                    message->timestamp > latestMessage->timestamp)
+                {
+                    latestMessage = message;
+                }
+            }
+            if (latestMessage)
+            {
+                channelId = latestMessage->userID;
+            }
+        }
+
+        this->userId_ = channelId;
+        const auto userIdText =
+            channelId.isEmpty() ? TEXT_UNAVAILABLE.toString() : channelId;
+        this->ui_.userIDLabel->setText(QString("ID: %1").arg(userIdText));
+        this->ui_.userIDLabel->setProperty(
+            "copy-text", channelId.isEmpty() ? TEXT_UNAVAILABLE.toString()
+                                              : channelId);
+        if (channelId.isEmpty())
+        {
+            this->ui_.followerCountLabel->setText(
+                TEXT_SUBSCRIBERS.arg(TEXT_UNAVAILABLE));
+            this->ui_.createdDateLabel->setText(
+                TEXT_CREATED.arg(TEXT_UNAVAILABLE));
+            return;
+        }
+
+        this->youtubeProfileUrl_ =
+            u"https://www.youtube.com/channel/" % channelId;
+        const auto applyProfileData = [this, channelId](
+                                          const YouTubeUserCardData &data) {
+            if (this->userId_ != channelId)
+            {
+                return;
+            }
+            const auto subscriberCount = data.subscriberCount.isEmpty()
+                                             ? (!data.pageParsed
+                                                    ? TEXT_UNAVAILABLE.toString()
+                                                    : QStringLiteral(
+                                                          "(not publicly shown)"))
+                                             : data.subscriberCount;
+            const auto createdDate = data.createdDate.isEmpty()
+                                         ? (data.pageParsed
+                                                ? QStringLiteral(
+                                                      "(not publicly available)")
+                                                : TEXT_UNAVAILABLE.toString())
+                                         : data.createdDate;
+            this->ui_.followerCountLabel->setText(
+                TEXT_SUBSCRIBERS.arg(subscriberCount));
+            this->ui_.createdDateLabel->setText(
+                TEXT_CREATED.arg(createdDate));
+
+            if (!data.avatarUrl.isEmpty())
+            {
+                this->avatarUrl_ = data.avatarUrl;
+                if (getApp()->getStreamerMode()->isEnabled() &&
+                    getSettings()->streamerModeHideUsercardAvatars)
+                {
+                    this->ui_.avatarButton->setPixmap(
+                        getResources().streamerMode);
+                }
+                else
+                {
+                    this->loadAvatar(QUrl(data.avatarUrl));
+                }
+            }
+        };
+
+        const auto now = QDateTime::currentDateTimeUtc();
+        const auto cached = youtubeUserCardCache.value(channelId);
+        if (!cached.fetchedAt.isNull())
+        {
+            applyProfileData(cached);
+            if (cached.fetchedAt.secsTo(now) < 600)
+            {
+                return;
+            }
+        }
+
+        NetworkRequest(
+            QUrl(u"https://www.youtube.com/channel/" % channelId %
+                 u"/about?hl=en"))
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .followRedirects(true)
+            .timeout(20000)
+            .caller(this)
+            .onSuccess([this, channelId, applyProfileData](
+                           const NetworkResult &response) {
+                auto data = parseYouTubeUserCardData(response.getData());
+                if (data.pageParsed)
+                {
+                    data.fetchedAt = QDateTime::currentDateTimeUtc();
+                    youtubeUserCardCache.insert(channelId, data);
+                }
+                logYouTubeDiagnostic(
+                    "usercard_profile_loaded",
+                    QString("status=%1 parsed=%2 subscribers=%3 created=%4 "
+                            "avatar=%5")
+                        .arg(response.status().value_or(0))
+                        .arg(data.pageParsed)
+                        .arg(!data.subscriberCount.isEmpty())
+                        .arg(!data.createdDate.isEmpty())
+                        .arg(!data.avatarUrl.isEmpty()));
+                if (data.fetchedAt.isNull())
+                {
+                    data = youtubeUserCardCache.value(channelId);
+                }
+                applyProfileData(data);
+            })
+            .onError([this, channelId, applyProfileData](
+                         const NetworkResult &response) {
+                logYouTubeDiagnostic(
+                    "usercard_profile_failed",
+                    QString("status=%1 error=%2")
+                        .arg(response.status().value_or(0))
+                        .arg(response.formatError()));
+                applyProfileData(youtubeUserCardCache.value(channelId));
+            })
+            .execute();
+        return;
+    }
+
     std::weak_ptr<bool> hack = this->lifetimeHack_;
     auto currentUser = getApp()->getAccounts()->twitch.getCurrent();
 

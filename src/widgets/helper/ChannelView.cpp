@@ -3139,9 +3139,12 @@ void ChannelView::showUserInfoPopup(const QString &userName,
     auto *userPopup =
         new UserInfoPopup(getSettings()->autoCloseUserPopup, this->split_);
 
-    auto contextChannel =
-        getApp()->getTwitch()->getChannelOrEmpty(alternativePopoutChannel);
     auto openingChannel = this->effectiveSourceChannel();
+    auto contextChannel =
+        openingChannel && openingChannel->getType() == Channel::Type::YouTube
+            ? Channel::getEmpty()
+            : getApp()->getTwitch()->getChannelOrEmpty(
+                  alternativePopoutChannel);
     userPopup->setData(userName, contextChannel, openingChannel);
 
     QPoint offset(userPopup->width() / 3, userPopup->height() / 5);

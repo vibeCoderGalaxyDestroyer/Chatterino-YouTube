@@ -7,7 +7,9 @@
 #include "common/Channel.hpp"
 
 #include <QDateTime>
+#include <QHash>
 #include <QStringList>
+#include <QTimer>
 
 #include <memory>
 
@@ -38,6 +40,7 @@ public:
     const QDateTime &actualStartTime() const;
     qint64 concurrentViewers() const;
     bool isChannelLookup() const;
+    bool hasKnownLiveStatus() const;
     const QString &lookupInput() const;
     void deleteMessage(const QString &messageId);
     void banUser(const QString &userId, int durationSeconds);
@@ -46,9 +49,19 @@ public:
 private:
     friend class YouTubeProvider;
 
+    struct ReplyTarget {
+        QString messageId;
+        QString authorId;
+        QString authorName;
+        QString messageText;
+        QDateTime timestamp;
+    };
+
     QString videoId_;
     QString lookupInput_;
     QString liveChatId_;
+    QString channelId_;
+    QString liveStatusUrl_;
     QString channelTitle_;
     QString videoTitle_;
     QString thumbnailUrl_;
@@ -57,7 +70,14 @@ private:
     YouTubeProvider *provider_;
     bool channelLookup_ = false;
     bool chatAvailable_ = false;
+    bool channelStatusKnown_ = false;
+    bool channelIsLive_ = false;
+    bool statusRequestInFlight_ = false;
+    bool offlineNoticeSent_ = false;
+    quint64 liveStatusRequestId_ = 0;
+    QTimer liveStatusTimer_;
     std::unique_ptr<YouTubeInnertubeReader> reader_;
+    QHash<QString, ReplyTarget> replyTargets_;
 
     void start();
     void stopStream();

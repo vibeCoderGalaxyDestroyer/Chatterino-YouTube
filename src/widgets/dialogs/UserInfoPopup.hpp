@@ -61,6 +61,7 @@ private:
     QString userName_;
     QString userId_;
     QString avatarUrl_;
+    QString youtubeProfileUrl_;
 
     // The channel the popup was opened from (e.g. /mentions or #forsen). Can be a special channel.
     ChannelPtr channel_;

@@ -69,6 +69,7 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
                              ui.channelName->setFocus();
                              ui.channelName->selectAll();
                          }
+                         this->adjustSize();
                      });
 
     ui.channel->installEventFilter(&this->tabFilter_);
@@ -90,6 +91,7 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
                              this->ui_.channelName->setFocus();
                              this->ui_.channelName->selectAll();
                          }
+                         this->adjustSize();
                      });
     ui.youtube->installEventFilter(&this->tabFilter_);
 

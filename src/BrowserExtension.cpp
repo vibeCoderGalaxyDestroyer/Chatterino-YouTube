@@ -4,6 +4,7 @@
 
 #include "BrowserExtension.hpp"
 
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "singletons/NativeMessaging.hpp"
 #include "util/RenameThread.hpp"
 
@@ -67,6 +68,9 @@ void runLoop()
             using namespace std::chrono_literals;
             if (!receivedMessage->exchange(false))
             {
+                logYouTubeDiagnostic(
+                    "intentional_exit",
+                    "source=browser_extension_timeout exit_code=1");
                 sendToBrowser(QLatin1String{
                     R"({"type":"status","status":"exiting-host","reason":"no message was received in 10s"})"});
                 _Exit(1);
@@ -91,6 +95,8 @@ void runLoop()
 
     sendToBrowser(QLatin1String{
         R"({"type":"status","status":"exiting-host","reason":"received EOF"})"});
+    logYouTubeDiagnostic("intentional_exit",
+                         "source=browser_extension_eof exit_code=0");
     _Exit(0);
 }
 }  // namespace

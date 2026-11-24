@@ -3,7 +3,10 @@
 This fork adds YouTube as a provider inside the existing Chatterino app. Twitch
 and YouTube splits can coexist in one tab, and each can also be placed in its
 own tab. Add a YouTube split with a live video URL or video ID, or enter a
-channel name, `@handle`, or channel URL to find that channel's active livestream.
+channel name, channel ID, `@handle`, legacy username, or channel URL to follow
+that channel. Channel tabs show offline/live status and check again every five
+minutes. When a stream starts, the tab switches to its chat and updates the
+header with the stream details.
 
 ## Included in this fork
 
@@ -11,49 +14,78 @@ channel name, `@handle`, or channel URL to find that channel's active livestream
   continuation and wait interval supplied by the page.
 - Sign in through Google OAuth in the system browser and send messages as the
   signed-in account.
-- Show paid chat, sticker descriptions, membership events, and author role
-  labels when the API provides their metadata.
+- Render text chat, Super Chats with the supplied currency amount and highlight
+  color, Super Stickers with their supplied artwork, new members, membership
+  milestones, gifted memberships, polls, and YouTube system notices when those
+  events appear in the live chat response.
+- Show YouTube's supplied author name colors, badge artwork, member emotes,
+  reply context, and hover previews when the response includes image variants.
+- Apply Chatterino's similarity filters and highlight rules to incoming YouTube
+  messages. The initial backlog is shown without replaying notification sounds.
+- Reflect message removals, user message removals, chat clears, banner changes,
+  and poll updates when Innertube sends those actions.
 - Add context menu actions to delete a message, timeout a user, or permanently
   ban a user. YouTube enforces owner/moderator permissions.
 - Open the video or its YouTube Studio livestream page. Signed-in users can
   also create a live poll from the split menu.
 
-Channel-name lookup chooses an exact channel-name match; if more than one
-channel has that name, use its `@handle` or channel URL. The selected channel
-must have an active livestream with chat enabled. Name lookup uses YouTube
-search requests, which consume additional API quota.
+Plain channel-name lookup searches YouTube's public results page and chooses an
+exact channel-title or handle match; if more than one channel has that title,
+use its `@handle` or channel URL. This lookup works without sign-in or an API
+key. If the public results page does not return a usable exact match, an
+optional official Data API fallback is used when OAuth or an API key is
+configured. Channel IDs, handles, legacy usernames, and channel URLs are
+monitored through their public `/live` pages. A resolved name is converted to
+its channel ID and monitored the same way, so the tab can find the next live
+video after the current stream ends. Open video-ID splits also start following
+the owning channel after its ID is read from the watch page.
 
 The app's local Accounts settings store the API key, OAuth client ID, optional
-OAuth client secret, and OAuth tokens. Public video links can be read without
-sign-in or a YouTube Data API key. Google OAuth is used for sending messages
-and moderation; a Desktop OAuth client ID is required to sign in. Chatterino
-itself does not request a YouTube password. Channel lookup still uses YouTube
-Data API requests and needs OAuth or an API key. Do not share the local
-Settings folder or embed a user's credentials in a distribution build.
+OAuth client secret, and OAuth tokens. Public video links and public channel
+chat can be read without sign-in or a YouTube Data API key. Google OAuth is
+used for sending messages and moderation; a Desktop OAuth client ID is
+required to sign in. Chatterino itself does not request a YouTube password.
+These values are currently saved as readable strings in
+`Settings/settings.json`; this fork does not encrypt them with Windows DPAPI or
+the Windows Credential Manager. Other programs running as the same Windows
+user can read that file. The Settings reveal panel only hides the values on
+screen and does not encrypt them. Do not share the local Settings folder or
+embed a user's credentials in a distribution build.
 
 ## API limitations
 
-Innertube is an undocumented endpoint used by YouTube's website. YouTube may
-change it or throttle requests, so reading can stop until the client is
-updated. These reads do not use the project's YouTube Data API quota. Channel
-name resolution and OAuth write actions still use official Data API methods and
-consume their documented quota. Direct video links need no API key for reading.
+Innertube and YouTube's public search page are undocumented interfaces used by
+YouTube's website. YouTube may change them or throttle requests, so name
+resolution, status detection, or chat reading can stop until the client is
+updated. Live-status checks run once every five minutes while a YouTube split
+is open; a new live event can therefore take up to five minutes to appear.
+These checks do not use the project's YouTube Data API quota. Normal
+channel-name resolution uses public search and does not use that quota; the
+optional API fallback and signed-in send/moderation metadata do. Each new
+stream may trigger one `videos.list` lookup for signed-in metadata and chat
+moderation access. Direct video links need no API key for reading.
 
-Innertube provides chat text, role badges, and some event metadata. This fork
-does not yet reproduce every native YouTube badge, custom emoji, or sticker
-image. Use **Open in YouTube** for native rendering and controls outside the
-chat view.
-Chat rows show the YouTube display name and message timestamp in local time.
-Tabs use the channel title rather than the livestream title.
-Owner, moderator, member, and verified status are shown as compact badges when
-the website includes them in the chat response. Membership months and level
-names are shown when available. Top Fan ranks and native badge artwork are not
-currently reproduced.
+Innertube is an undocumented endpoint. The app renders the event and image
+metadata that YouTube sends to this client; it cannot guarantee parity with
+every badge, emote, membership event, or control shown in YouTube's website.
+Some built-in badges do not include image URLs and use a compact local icon.
+Use **Open in YouTube** for native rendering and controls outside the chat
+view. Chat rows show the YouTube display name and message timestamp in local
+time. The stream header labels YouTube chats with `(YT)`.
 
 Moderator actions and poll creation are shown for a signed-in account. The API
-rejects them if that account lacks permission for the live chat. Studio remains
-the full YouTube broadcaster control room; this fork does not implement all
-broadcast metadata, status, or chat-mode controls.
+rejects them if that account lacks permission for the live chat. Reading uses
+Innertube and does not make YouTube Data API chat-list requests. Sending,
+moderation, and the optional channel-name search fallback use official Data
+API requests and consume their documented quota. Studio remains the full
+YouTube broadcaster control room; this fork does not implement every
+broadcast or chat setting.
+
+For crash tracing, the app writes a local, rotating diagnostic file to
+`<Chatterino data directory>/Logs/youtube-diagnostics.log`. It records startup
+and shutdown, reader heartbeats, request/retry counts, and event batch sizes;
+it does not record chat text or credentials. The active file rotates at 2 MiB
+and keeps three previous files.
 
 ## References
 

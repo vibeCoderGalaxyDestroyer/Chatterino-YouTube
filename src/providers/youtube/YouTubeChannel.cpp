@@ -7,6 +7,7 @@
 #include "providers/youtube/YouTubeInnertubeReader.hpp"
 #include "providers/youtube/YouTubeProvider.hpp"
 
+#include <QObject>
 #include <utility>
 
 namespace chatterino {
@@ -18,6 +19,9 @@ YouTubeChannel::YouTubeChannel(QString input, bool channelLookup,
     , provider_(provider)
     , channelLookup_(channelLookup)
 {
+    this->liveStatusTimer_.setInterval(5 * 60 * 1000);
+    QObject::connect(&this->liveStatusTimer_, &QTimer::timeout,
+                     [this] { this->provider_->checkLiveStatus(this); });
     if (!channelLookup)
     {
         this->videoId_ = std::move(input);
@@ -41,7 +45,8 @@ void YouTubeChannel::sendMessage(const QString &message)
 
 bool YouTubeChannel::isLive() const
 {
-    return this->chatAvailable_ || !this->liveChatId_.isEmpty();
+    return this->channelIsLive_ || this->chatAvailable_ ||
+           !this->liveChatId_.isEmpty();
 }
 
 bool YouTubeChannel::canReconnect() const
@@ -104,6 +109,11 @@ bool YouTubeChannel::isChannelLookup() const
     return this->channelLookup_;
 }
 
+bool YouTubeChannel::hasKnownLiveStatus() const
+{
+    return this->channelStatusKnown_;
+}
+
 const QString &YouTubeChannel::lookupInput() const
 {
     return this->lookupInput_;
@@ -128,8 +138,14 @@ void YouTubeChannel::createPoll(const QString &question,
 void YouTubeChannel::start()
 {
     this->stopStream();
+    this->replyTargets_.clear();
     this->chatAvailable_ = false;
     this->liveChatId_.clear();
+    this->channelStatusKnown_ = false;
+    this->channelIsLive_ = false;
+    this->offlineNoticeSent_ = false;
+    this->statusRequestInFlight_ = false;
+    ++this->liveStatusRequestId_;
     if (this->channelLookup_)
     {
         this->videoId_.clear();
@@ -139,6 +155,9 @@ void YouTubeChannel::start()
 
 void YouTubeChannel::stopStream()
 {
+    this->liveStatusTimer_.stop();
+    this->statusRequestInFlight_ = false;
+    ++this->liveStatusRequestId_;
     if (this->reader_)
     {
         auto reader = std::move(this->reader_);

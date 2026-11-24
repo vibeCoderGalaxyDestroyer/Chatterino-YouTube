@@ -51,6 +51,7 @@
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/twitch/TwitchUsers.hpp"
 #include "providers/youtube/YouTubeProvider.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "singletons/CrashHandler.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/helper/LoggingChannel.hpp"
@@ -70,6 +71,7 @@
 
 #include <miniaudio.h>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDesktopServices>
 
 namespace {
@@ -203,10 +205,17 @@ Application::Application(Settings &_settings, const Paths &paths,
     , nmServer(new NativeMessagingServer())
     , updates(_updates)
 {
+    initializeYouTubeDiagnostics(paths.messageLogDirectory);
+    logYouTubeDiagnostic(
+        "application_start",
+        QString("version=%1 pid=%2")
+            .arg(QCoreApplication::applicationVersion())
+            .arg(QCoreApplication::applicationPid()));
 }
 
 Application::~Application()
 {
+    logYouTubeDiagnostic("application_shutdown");
     // we do this early to ensure getApp isn't used in any dtors
     INSTANCE = nullptr;
 }
@@ -315,7 +324,11 @@ int Application::run()
         this->windows->getMainWindow().show();
     }
 
-    return QApplication::exec();
+    const auto exitCode = QApplication::exec();
+    logYouTubeDiagnostic(
+        "application_event_loop_returned",
+        QString("exit_code=%1").arg(exitCode));
+    return exitCode;
 }
 
 Theme *Application::getThemes()

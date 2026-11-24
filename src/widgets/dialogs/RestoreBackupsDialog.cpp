@@ -5,6 +5,7 @@
 #include "widgets/dialogs/RestoreBackupsDialog.hpp"
 
 #include "common/QLogging.hpp"
+#include "providers/youtube/YouTubeDiagnostics.hpp"
 #include "util/Backup.hpp"
 #include "util/FilesystemHelpers.hpp"
 #include "util/FormatTime.hpp"
@@ -31,6 +32,10 @@ namespace {
 
 void closeApp()
 {
+    chatterino::logYouTubeDiagnostic(
+        "intentional_exit", "source=restore_backup_dialog exit_code=1");
+    qCWarning(chatterinoApp)
+        << "Restore-backup dialog requested intentional process exit code 1";
     // Using a force exit over QApplication::exit, because we're currently in
     // the initialization. QApplication::exit only tells the eventloops to exit,
     // but it returns to the caller. If we return, we'd continue with the

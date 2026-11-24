@@ -13,26 +13,26 @@ The `youtube-innertube-preview` branch adds experimental YouTube live-chat suppo
 ### Features
 
 - Read public live chat from a YouTube video URL or video ID using YouTube's Innertube live-chat endpoint. Chat reading does not poll the YouTube Data API, so it avoids spending Data API quota on each chat refresh.
+- Follow a channel by its channel name, `@handle`, username URL, channel ID, or channel URL. Channel name search uses YouTube's public search page, so viewing and reconnecting to future streams does not require sign-in.
 - Show YouTube chat badges, custom and member-only emotes, Super Chats and Super Stickers with their amounts, membership and gift announcements, and reply markers when YouTube provides reply metadata.
 - Show stream details in the chat header, including the title and live thumbnail on hover when available.
 - Sign in with Google OAuth to send messages and use supported moderation actions.
 
-Innertube is an undocumented YouTube interface and may change. OAuth-backed actions and API-based channel lookups still use the YouTube Data API and count toward its quota. A Data API key is optional when opening a direct public video link; it can be used for channel-name lookup while signed out.
+Innertube and YouTube's public search page are undocumented interfaces and may change. OAuth-backed actions and the optional Data API fallback for channel-name lookup use the YouTube Data API and count toward its quota. Reading public chat and normal channel-name lookup do not require sign-in or an API key.
 
 ### YouTube setup
 
-1. In Google Cloud, enable YouTube Data API v3 for the project used by your OAuth client.
-2. Create a Google OAuth client with the **Desktop app** application type. If the OAuth consent screen is in testing mode, add the Google account you plan to use as a test user.
-3. In Chatterino, open **Settings → Accounts**, enter the OAuth client ID (and client secret if your client configuration requires it), then choose **Sign in to YouTube**.
-4. Paste a YouTube live-video URL or video ID into Chatterino to open its chat. You do not need a Data API key just to read chat from a direct video link.
+1. Download the [Windows x64 preview ZIP](https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest) and extract the entire archive to a separate folder. Run `chatterino.exe` from that folder. Keep its DLLs and Qt plugin folders beside the executable.
+2. Paste a YouTube live-video URL or video ID to open that stream, or add a channel name/`@handle`/channel URL to follow the channel. A channel split checks every five minutes and attaches to chat when the channel goes live, then follows its next live stream after the current one ends. Reading public chat needs no sign-in or API key.
+3. To send messages or use supported moderation actions, enable YouTube Data API v3 in Google Cloud, create a **Desktop app** OAuth client, and enter its client ID (and secret if required) under **Settings → Accounts**. If the OAuth consent screen is in testing mode, add your Google account as a test user before choosing **Sign in to YouTube**.
 
 This repository is private. Anyone cloning it must first be granted access to the GitHub repository.
 
 ### Use this fork with an existing Chatterino install
 
-You cannot add the YouTube features to an existing upstream Chatterino installation with a setting or plugin. They are compiled into this fork, so you need to build and run a version from the `youtube-innertube-preview` branch. You do not need to uninstall the official app: keep the fork in a separate folder and run its build there.
+You cannot add the YouTube features to an existing upstream Chatterino installation with a setting or plugin. They are compiled into this fork. You do not need to uninstall the official app: extract this fork's release ZIP into a separate folder and run it there, or build it from the `youtube-innertube-preview` branch.
 
-On Windows, follow the build steps below and the [standalone packaging instructions](BUILDING_ON_WINDOWS.md#producing-standalone-builds). Copy the complete packaged output, including its Qt runtime files, into a separate folder; copying only `chatterino.exe` is not enough. Then launch `chatterino.exe` from that folder.
+The release ZIP already includes the Qt runtime files. If building locally instead, follow the build steps below and the [standalone packaging instructions](BUILDING_ON_WINDOWS.md#producing-standalone-builds). Copying only `chatterino.exe` is not enough.
 
 By default, the fork uses the same Chatterino settings profile as the official install. To keep the fork's settings and cache separate, create a file named `modes` beside its executable and put this single line in it:
 
@@ -43,6 +43,8 @@ portable
 Replacing the official installation is possible, but back up the installation and your settings first, and replace the complete packaged output rather than only the executable. With the updater enabled (the default), this fork still checks the upstream Chatterino update service, so an upstream update may replace the fork's YouTube build. Running it in a separate portable folder is the safer option.
 
 ## Download
+
+Download this fork's [YouTube preview release](https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest) for Windows x64. Extract the entire ZIP before launching. The separate symbols ZIP is for crash debugging and is not needed to run the app. This repository and its downloads are private; only invited collaborators can access them.
 
 Current releases are available at [https://chatterino.com](https://chatterino.com).
 Windows users can also install Chatterino [from Chocolatey](https://chocolatey.org/packages/chatterino).
