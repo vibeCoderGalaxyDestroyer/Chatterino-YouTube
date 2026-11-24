@@ -1,8 +1,23 @@
-![chatterinoLogo](https://user-images.githubusercontent.com/41973452/272541622-52457e89-5f16-4c83-93e7-91866c25b606.png)
-Chatterino 2 [![GitHub Actions Build (Windows, Ubuntu, MacOS)](https://github.com/Chatterino/chatterino2/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/Chatterino/chatterino2/actions?query=workflow%3ABuild+branch%3Amaster) [![Build FreeBSD](https://github.com/Chatterino/chatterino2/actions/workflows/build-freebsd.yml/badge.svg)](https://github.com/Chatterino/chatterino2/actions/workflows/build-freebsd.yml) [![Chocolatey Package](https://img.shields.io/chocolatey/v/chatterino?include_prereleases)](https://chocolatey.org/packages/chatterino) [![Flatpak Package](https://img.shields.io/flathub/v/com.chatterino.chatterino)](https://flathub.org/apps/details/com.chatterino.chatterino)
-============
+<p align="center">
+  <img src="resources/icon.svg" alt="Chatterino logo" width="88" height="88">
+  &nbsp;&nbsp;
+  <img src="docs/resources/youtube.svg" alt="YouTube logo" width="88" height="88">
+</p>
 
-Chatterino 2 is a chat client for [Twitch.tv](https://twitch.tv).
+<h1 align="center">Chatterino-YouTube</h1>
+
+<p align="center">
+  <a href="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/actions?query=workflow%3ABuild+branch%3Ayoutube-innertube-preview"><img alt="Build status" src="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/actions/workflows/build.yml/badge.svg?branch=youtube-innertube-preview"></a>
+  <a href="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/actions?query=workflow%3ABuild+branch%3Ayoutube-innertube-preview"><img alt="FreeBSD build status" src="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/actions/workflows/build-freebsd.yml/badge.svg?branch=youtube-innertube-preview"></a>
+  <a href="https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/vibeCoderGalaxyDestroyer/Chatterino-YouTube?include_prereleases"></a>
+</p>
+
+<p align="center">
+  <a href="https://silkstack.ai"><img src="docs/resources/weaver.svg" alt="Weaver logo" width="24" height="24"></a>
+  Made with <a href="https://silkstack.ai">Weaver</a>
+</p>
+
+Chatterino-YouTube is a fork of [Chatterino 2](https://github.com/Chatterino/chatterino2), a chat client for [Twitch.tv](https://twitch.tv), with YouTube live chat support.
 The Chatterino 2 wiki can be found [here](https://wiki.chatterino.com).
 Contribution guidelines can be found [here](https://wiki.chatterino.com/Contributing%20for%20Developers).
 
@@ -26,8 +41,6 @@ Innertube and YouTube's public search page are undocumented interfaces and may c
 2. Paste a YouTube live-video URL or video ID to open that stream, or add a channel name/`@handle`/channel URL to follow the channel. A channel split checks every five minutes and attaches to chat when the channel goes live, then follows its next live stream after the current one ends. Reading public chat needs no sign-in or API key.
 3. To send messages or use supported moderation actions, enable YouTube Data API v3 in Google Cloud, create a **Desktop app** OAuth client, and enter its client ID (and secret if required) under **Settings → Accounts**. If the OAuth consent screen is in testing mode, add your Google account as a test user before choosing **Sign in to YouTube**.
 
-This repository is private. Anyone cloning it must first be granted access to the GitHub repository.
-
 ### Use this fork with an existing Chatterino install
 
 You cannot add the YouTube features to an existing upstream Chatterino installation with a setting or plugin. They are compiled into this fork. You do not need to uninstall the official app: extract this fork's release ZIP into a separate folder and run it there, or build it from the `youtube-innertube-preview` branch.
@@ -44,7 +57,7 @@ Replacing the official installation is possible, but back up the installation an
 
 ## Download
 
-Download this fork's [YouTube preview release](https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest) for Windows x64. Extract the entire ZIP before launching. The separate symbols ZIP is for crash debugging and is not needed to run the app. This repository and its downloads are private; only invited collaborators can access them.
+Download this fork's [YouTube preview release](https://github.com/vibeCoderGalaxyDestroyer/Chatterino-YouTube/releases/latest) for Windows x64. Extract the entire ZIP before launching. The separate symbols ZIP is for crash debugging and is not needed to run the app.
 
 Current releases are available at [https://chatterino.com](https://chatterino.com).
 Windows users can also install Chatterino [from Chocolatey](https://chocolatey.org/packages/chatterino).
@@ -52,7 +65,7 @@ These upstream downloads do not include this fork's YouTube changes.
 
 ## Nightly build
 
-You can download the latest Chatterino 2 build over [here](https://github.com/Chatterino/chatterino2/releases/tag/nightly-build)
+You can download the latest upstream Chatterino 2 build over [here](https://github.com/Chatterino/chatterino2/releases/tag/nightly-build)
 
 You might also need to install the [VC++ Redistributables](https://aka.ms/vs/17/release/vc_redist.x64.exe) from Microsoft if you do not have it installed already.  
 If you still receive an error about `MSVCR120.dll missing`, then you should install the [VC++ 2013 Restributable](https://download.microsoft.com/download/2/E/6/2E61CFA4-993B-4DD4-91DA-3737CD5CD6E3/vcredist_x64.exe).
@@ -99,3 +112,9 @@ For more contribution guidelines, take a look at [the wiki](https://wiki.chatter
 ## Doxygen
 
 Doxygen is used to generate project information daily and is available [here](https://doxygen.chatterino.com).
+
+## Contributors
+
+- [vibeCoderGalaxyDestroyer](https://github.com/vibeCoderGalaxyDestroyer) — project maintainer and YouTube fork.
+- [Chatterino contributors](https://github.com/Chatterino/chatterino2/graphs/contributors) — the upstream chat client.
+- [OpenAI Codex](https://openai.com/codex/) — AI coding assistant credited for this branding update.
